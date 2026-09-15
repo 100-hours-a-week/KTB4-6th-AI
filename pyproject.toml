@@ -1,0 +1,7 @@
+[project]
+name = "meety-ai"
+version = "0.1.0"
+description = "Meety 회의 전사 및 분석 AI 서비스"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = []
