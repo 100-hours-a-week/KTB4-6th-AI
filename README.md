@@ -20,13 +20,7 @@ uv add <package>
 uv add --dev <package>
 ```
 
-`pyproject.toml`, `.python-version`, `uv.lock`은 버전 관리에 포함하고 `.venv`는 제외합니다.
-
 ## 서버 실행
-
-저장소 루트에서 실행합니다. 환경변수 없이도 로컬 기본값으로 시작합니다.
-필요하면 `.env.example`을 참고해 `.env`를 만듭니다. OS 환경변수가 `.env`보다 우선합니다.
-설정은 `pydantic-settings`로 검증하며 잘못된 환경명이나 로그 레벨은 시작 시 거부합니다.
 
 ```bash
 # 실시간 AI
