@@ -18,25 +18,47 @@ Use `<type>: <Korean summary>`. Allowed types: `feat`, `fix`, `refactor`, `docs`
 - 코드 주석과 docstring은 한글로 작성한다. 식별자, 라이브러리명 등 필요한 기술 용어는 원문을 유지할 수 있다.
 
 ## Testing Guidelines
-- Do not add tests automatically for every code change.
-- Before writing tests, identify the behavior or regression risk that actually needs protection.
-- Prefer a small number of meaningful tests over broad test coverage.
-- Prefer integration tests for important application flows.
-- Use unit tests mainly for complex logic, edge cases, and pure functions.
-- For bug fixes, add one regression test that reproduces the bug before fixing it.
-- Do not test implementation details, trivial code, framework behavior, or behavior already covered by existing tests.
-- Avoid excessive mocking and duplicate tests.
-- During development, run only relevant tests. Run the full test suite before completing the task.
-- A test is valuable only if breaking the intended behavior would cause it to fail.
+
+### 기본 역할: 테스트 설계와 학습 지원
+
+- 테스트는 사용자가 직접 구현하며 학습한다. 에이전트는 기본적으로 실행 가능한 테스트·fixture·mock·assert를 작성하거나 기존 테스트를 대신 수정하지 않는다.
+- 테스트 계획을 요청받으면 기존 코드·요구사항·테스트를 먼저 확인하고, 필요한 사례의 주석 틀만 작성한다. 사용자가 작성한 코드와 기존 테스트는 보존하며, 파일을 비우거나 대체하는 일은 명시적인 요청이 있을 때만 한다.
+
+
+### 좋은 테스트를 고르는 기준
+
+- 모든 코드 변경에 자동으로 테스트를 추가하지 않는다. 먼저 보호할 동작과 실제 회귀 위험을 설명하고 기존 테스트와 중복되는지 확인한다.
+- 넓은 커버리지보다 적은 수의 의미 있는 테스트를 우선한다. 중요한 애플리케이션 흐름에는 통합 테스트를, 복잡한 로직·경계값·순수 함수에는 단위 테스트를 사용한다.
+- 구현 세부사항, 사소한 코드, 프레임워크 자체 동작, 이미 검증된 동작을 반복해서 테스트하지 않는다. 과도한 mocking을 피하고 필요한 외부 경계만 대체한다.
+- 의도한 동작이 깨지면 반드시 실패해야 한다. 예외가 발생했다는 사실뿐 아니라 의도한 원인으로 실패했는지, 거부된 입력이 후속 처리로 넘어가지 않는지 확인하도록 설계한다.
+- 버그 수정에는 실제 버그를 재현하는 최소 회귀 테스트 하나를 우선한다. 서로 다른 위험을 보호할 때만 사례를 추가하며, 여러 사례가 필요하면 각각의 이유를 짧게 설명한다.
+
+### 주석 틀 작성 방식
+
+각 테스트는 필요한 항목만 다음 형식으로 작성한다. 전체 후보를 나열하기보다 지금 필요한 테스트부터 구현 순서대로 제안한다.
+
+```python
+# 테스트 이름: test_...
+# 목적: 보호할 동작과 이 테스트가 필요한 이유.
+# 준비: 입력·초기 상태·필요한 외부 의존성 대체.
+# 실행: 사용자가 수행할 호출 또는 메시지 순서.
+# 기대 결과: 외부에서 관찰할 응답·오류·상태와 필요한 자원 정리.
+# 실패 조건: 어떤 동작이 깨졌을 때 이 테스트가 실패해야 하는지.
+```
+
+- 필요한 경우 경계값과 정상·예외 사례를 덧붙인다. 무한 대기나 자원 누수 위험이 있으면 실행 기한과 실패 시 정리 방법도 안내한다.
+- 사용자가 구현을 시작할 수 있도록 핵심 API와 역할, 다음 한 단계만 설명한다. 먼저 완성 코드를 제공하지 않는다.
+- 사용자가 작성한 테스트의 검토를 요청하면 실제 코드를 읽고, 무엇을 검증하는지·어떤 버그를 놓치는지·어떻게 고치면 되는지 설명한다. 수정 요청이 없으면 직접 고치지 않는다.
+- 테스트 실행은 가능하다. 개발 중에는 관련 테스트만 실행하고 작업 완료 전에는 전체 테스트를 실행한다. 실행하지 못한 검사, 실패, 미구현 계획을 통과 결과와 구분해 보고한다.
 
 ### Workflow
 
-For normal feature work:
+일반 기능 작업:
 
-`Requirement → Test plan → Implementation → Minimal necessary tests → Verification`
+`요구사항 확인 → 기존 테스트 확인 → 최소 주석 틀 → 사용자 테스트 구현 → 실행·리뷰 → 검증`
 
-For bug fixes:
+버그 수정:
 
-`Reproduce with failing test → Fix → Verify test passes`
+`최소 재현 테스트의 주석 틀 → 사용자 구현 → 실패 재현 확인 → 버그 수정 → 동일 테스트 통과 확인`
 
-Before adding multiple tests, briefly explain why each test is necessary and check whether existing tests already cover the behavior.
+기능 구현은 합의한 테스트 계획을 기준으로 진행한다. 사용자가 테스트 구현도 명시적으로 요청하면 해당 단계만 에이전트가 수행한다. 테스트가 미완성이면 검증 대기 상태를 알리고, 통과한 것처럼 처리하지 않는다.
