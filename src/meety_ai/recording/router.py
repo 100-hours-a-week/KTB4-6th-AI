@@ -1,5 +1,6 @@
 """Backend 전용 WebSocket의 수신·응답·연결 종료를 처리한다."""
 
+import asyncio
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
@@ -41,7 +42,11 @@ async def start_recording_session(websocket: WebSocket) -> None:
         await websocket.accept()
         try:
             while True:
-                data = await websocket.receive()
+                if session.expects_binary:
+                    async with asyncio.timeout(BINARY_WAIT_TIMEOUT):
+                        data = await websocket.receive()
+                else:
+                    data = await websocket.receive()
                 if data["type"] == "websocket.disconnect":
                     break
 
