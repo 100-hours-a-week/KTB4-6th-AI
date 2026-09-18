@@ -12,7 +12,7 @@ from starlette.websockets import WebSocketDisconnect
 from meety_ai.live import create_live_app
 
 WEBSOCKET_URL = "/v1/live-meeting"
-
+CHUNK_SIZE = 16 * 1024
 
 start_message = {
     "type": "session.start",
@@ -172,8 +172,8 @@ def test_audio_message_order(fake_decoders):
 # 핵심 API: TestClient.websocket_connect, send_json, send_bytes, receive_json.
 def test_connections_are_isolated_on_disconnect(fake_decoders):
     with TestClient(create_live_app()) as client:
-        with client.websocket_connect("/v1/live-meeting") as ws_b:
-            with client.websocket_connect("/v1/live-meeting") as ws_a:
+        with client.websocket_connect(WEBSOCKET_URL) as ws_b:
+            with client.websocket_connect(WEBSOCKET_URL) as ws_a:
                 ws_a.send_json(
                     {
                         "type": "session.start",
@@ -267,3 +267,39 @@ def test_connections_are_isolated_on_disconnect(fake_decoders):
 
         assert decoder_b.fed == [b"chunk b", b"chunk b1", b"chunk b2"]
         assert decoder_b.closed
+
+
+# #10: 실제 ffmpeg까지 연결한 실시간 수신·변환 흐름
+
+
+# 테스트 이름: test_live_meeting_with_real_ffmpeg
+# 목적: WebSocket 수신 → 세션 → 실제 ffmpeg 디코딩 → 종료 응답까지의 실제 배선을 확인한다.
+# 준비: fake_decoders를 받지 않아 실제 AudioDecoder를 사용한다.
+# 준비: conftest.py의 audio_samples["webm_opus"] 입력(10초). ffmpeg가 없으면 skip.
+# 실행: start → ready → 입력을 16KB씩 나눠 meta(n)/binary 반복 → stop → ended.
+# 기대 결과: ended의 lastSequence가 마지막 청크 번호이고 audioDurationMs가 10000이다.
+# 기대 결과: close 1000으로 종료된다.
+# 실패 조건: 실제 디코더 호출 순서나 PCM 합산이 어긋나 오류·멈춤·잘못된 길이가 나온다.
+# 주의: TestClient의 receive_json에는 기한이 없으므로 응답이 없는 메시지 뒤에 호출하지 않는다.
+# 핵심 API: audio_samples, TestClient.websocket_connect, send_json, send_bytes, receive_json.
+def test_live_meeting_with_real_ffmpeg(audio_samples):
+    encoded, reference_pm = audio_samples["webm_opus"]
+    with TestClient(create_live_app()) as client:
+        with client.websocket_connect(WEBSOCKET_URL) as ws:
+            ws.send_json(start_message)
+            ready = ws.receive_json()
+
+            chunks = [encoded[i : i + CHUNK_SIZE] for i in range(0, len(encoded), CHUNK_SIZE)]
+            for i, chunk in enumerate(chunks):
+                ws.send_json({"type": "audio.meta", "payload": {"sequence": i}})
+                ws.send_bytes(chunk)
+
+            ws.send_json(stop_message)
+            ended = ws.receive_json()
+
+            assert ended["payload"]["lastSequence"] == len(chunks) - 1
+            assert ended["payload"]["audioDurationMs"] == 10000
+
+            with pytest.raises(WebSocketDisconnect) as error:
+                ws.receive_json()
+                assert error.value.code == 1000

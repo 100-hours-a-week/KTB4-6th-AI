@@ -3,7 +3,7 @@
 # 공통 준비
 # - ffmpeg가 없으면 모듈 전체를 skip한다.
 #   pytestmark = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason=...)
-# - scope="module" fixture에서 subprocess.run으로 입력 자료와 기준 PCM을 만든다.
+# - 입력 자료와 기준 PCM은 conftest.py의 audio_samples fixture가 만든다.
 # - 입력 출처: -f lavfi -i sine=frequency=440:duration=10 (10초 사인파)를 인코딩한다.
 #   - WebM+Opus: -c:a libopus -f webm pipe:1
 #   - MP4+AAC: -c:a aac -movflags frag_keyframe+empty_moov -f mp4 pipe:1
@@ -12,39 +12,10 @@
 # - 핵심 API: subprocess.run([...], input=..., capture_output=True, check=True).stdout
 
 import asyncio
-import subprocess
 
 import pytest
 
 from meety_ai.recording.decoder import AudioDecodeError, AudioDecoder
-
-SINE_SOURCE = ["-f", "lavfi", "-i", "sine=frequency=440:duration=10"]
-ENCODE_OPTIONS = {
-    "webm_opus": ["-c:a", "libopus", "-f", "webm"],
-    "mp4_aac": ["-c:a", "aac", "-movflags", "frag_keyframe+empty_moov", "-f", "mp4"],
-}
-
-
-def run_ffmpeg(*args, input=None):
-    return subprocess.run(
-        ["ffmpeg", "-loglevel", "error", *args, "pipe:1"],
-        input=input,
-        capture_output=True,
-        check=True,
-    ).stdout
-
-
-@pytest.fixture(scope="module")
-def audio_samples():
-    """형식별 (압축 입력, 입력 전체를 한 번에 변환한 기준 PCM)을 만든다."""
-    samples = {}
-    for audio_format, options in ENCODE_OPTIONS.items():
-        encoded = run_ffmpeg(*SINE_SOURCE, *options)
-        reference_pcm = run_ffmpeg(
-            "-i", "pipe:0", "-ac", "1", "-ar", "16000", "-f", "s16le", input=encoded
-        )
-        samples[audio_format] = (encoded, reference_pcm)
-    return samples
 
 
 # 테스트 이름: test_streaming_pcm_and_final_flush
