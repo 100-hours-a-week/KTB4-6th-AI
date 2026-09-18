@@ -1,16 +1,3 @@
-# #12: 실제 FFmpeg 디코딩 검증
-
-# 공통 준비
-# - ffmpeg가 없으면 모듈 전체를 skip한다.
-#   pytestmark = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason=...)
-# - 입력 자료와 기준 PCM은 conftest.py의 audio_samples fixture가 만든다.
-# - 입력 출처: -f lavfi -i sine=frequency=440:duration=10 (10초 사인파)를 인코딩한다.
-#   - WebM+Opus: -c:a libopus -f webm pipe:1
-#   - MP4+AAC: -c:a aac -movflags frag_keyframe+empty_moov -f mp4 pipe:1
-# - 기준 PCM: 입력 전체를 AudioDecoder와 같은 옵션(-ac 1 -ar 16000 -f s16le)으로
-#   한 번에 변환한 결과.
-# - 핵심 API: subprocess.run([...], input=..., capture_output=True, check=True).stdout
-
 import asyncio
 
 import pytest

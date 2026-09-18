@@ -1,8 +1,3 @@
-"""WebSocket 라우터 통합 테스트 작성 계획.
-
-실제 앱·라우터·스키마·세션을 사용하고 AudioDecoder만 대체한다.
-"""
-
 import json
 
 import pytest
@@ -283,11 +278,12 @@ def test_connections_are_isolated_on_disconnect(fake_decoders):
 # 주의: TestClient의 receive_json에는 기한이 없으므로 응답이 없는 메시지 뒤에 호출하지 않는다.
 # 핵심 API: audio_samples, TestClient.websocket_connect, send_json, send_bytes, receive_json.
 def test_live_meeting_with_real_ffmpeg(audio_samples):
-    encoded, reference_pm = audio_samples["webm_opus"]
+    encoded, reference_pcm = audio_samples["webm_opus"]
     with TestClient(create_live_app()) as client:
         with client.websocket_connect(WEBSOCKET_URL) as ws:
             ws.send_json(start_message)
             ready = ws.receive_json()
+            assert ready["type"] == "session.ready"
 
             chunks = [encoded[i : i + CHUNK_SIZE] for i in range(0, len(encoded), CHUNK_SIZE)]
             for i, chunk in enumerate(chunks):
@@ -298,8 +294,8 @@ def test_live_meeting_with_real_ffmpeg(audio_samples):
             ended = ws.receive_json()
 
             assert ended["payload"]["lastSequence"] == len(chunks) - 1
-            assert ended["payload"]["audioDurationMs"] == 10000
+            assert ended["payload"]["audioDurationMs"] == len(reference_pcm) // 32
 
             with pytest.raises(WebSocketDisconnect) as error:
                 ws.receive_json()
-                assert error.value.code == 1000
+            assert error.value.code == 1000
