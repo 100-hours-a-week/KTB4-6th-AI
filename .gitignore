@@ -16,3 +16,6 @@ htmlcov/
 .env.*
 !.env.example
 .DS_Store
+
+# 로컬 학습 가이드
+/docs/guides/
