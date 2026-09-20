@@ -1,0 +1,26 @@
+# 버전 관리
+.git
+.github
+
+# 문서 (런타임에 불필요)
+docs
+AGENTS.md
+CLAUDE.md
+CONTEXT.md
+
+# 로컬 Python 버전 고정 (컨테이너는 base image가 3.12로 이미 고정)
+.python-version
+
+# 환경변수 (실제 값은 배포 환경에서 주입, 이미지에 포함 금지)
+.env
+.env.*
+
+# 로컬 가상환경 / 캐시 (uv sync가 컨테이너 내부에서 새로 생성)
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+
+# OS 캐시 파일
+.DS_Store
