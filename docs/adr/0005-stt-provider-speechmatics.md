@@ -1,4 +1,4 @@
-# ADR-0005: 실시간 전사 STT 공급자로 Speechmatics Enhanced realtime을 사용한다
+# ADR-0005-1: 실시간 회의 전사에 Speechmatics Enhanced realtime을 사용한다
 
 ## Status
 
@@ -8,97 +8,89 @@ Proposed
 
 ## Context
 
-실시간 전사 공급자는 전사 결과의 품질·시간 정보·운영 한도와 비용을 함께 결정한다. 공급자 API의 입력 제약은 이후 오디오 처리 방식에도 영향을 주므로, 오디오 처리 위치와 도구보다 먼저 선택한다.
+Meety는 회의가 진행되는 동안 한국어 음성을 전사하고, 그 기록을 회의 질의응답·요약·분석에 사용한다. 전사 내용뿐 아니라 발언 위치를 찾을 수 있는 시간 정보가 필요하며, 동시에 20개 회의를 처리하는 것을 목표로 한다. 회의에 등장하는 제품명·인명·기술 용어도 전사에 반영할 수 있어야 한다.
 
-```text
-STT 공급자 선택 (이 ADR)
-  └─ 입력 규격 결정
-       └─ 오디오 처리 위치 결정 (ADR-0006)
-            └─ 디코더 결정 (ADR-0007)
-```
+이를 위해 한국어 실시간 전사 API를 조사하고 회의 녹음으로 비교했다. 최종 후보를 좁힌 과정은 다음과 같다.
 
-초기 후보는 AWS Transcribe, Google Cloud Speech-to-Text, Azure AI Speech, AssemblyAI, Deepgram, ElevenLabs, Speechmatics, Gemini Live, Soniox, Gladia, NAVER CLOVA Speech, OpenAI였다. 한국어 realtime, 확정 결과, 전사 위치에 쓸 timestamp를 기준으로 다음과 같이 걸렀다.
+- **Deepgram·Gemini Live:** 전사 실험에서 Speechmatics·ElevenLabs보다 문자 오류율(CER)이 높아 제외했다.
+- **AWS Transcribe·Google Cloud Speech-to-Text·Azure AI Speech·AssemblyAI:** 기본 기능은 확인했으나 회의 녹음 비교까지 진행하지 않아 후속 검토 대상으로 남겼다.
+- **Gladia·NAVER CLOVA Speech:** 조사에서 한국어 실시간 결과와 화자 정보 등 필요한 기능의 제공 범위를 충분히 확인하지 못해 보류했다.
+- **OpenAI:** 조사한 파일 전사 경로는 회의 중 연속 전사와 맞지 않았고, 실험도 크레딧 부족으로 완료하지 못해 제외했다.
 
-- **비교 전 제외:** Gladia는 한국어 live 응답 지원을 확인하지 못했고, CLOVA는 음절 단위 시간 정보와 live diarization 제약 때문에 제외했다. OpenAI는 지속 오디오 realtime 경로와 실측 점수가 없어 제외했다.
-- **추가 실험 대상으로 보류:** AWS·Google·Azure·AssemblyAI는 기본 기능을 갖췄지만, 같은 Korean meeting gold realtime 비교를 하지 않아 결승 후보에 넣지 않았다.
-- **실측 결과로 제외:** Gemini Live와 Deepgram은 같은 realtime 실험에서 CER이 낮아 제외했다.
-- **결승 후보 유지:** Speechmatics, ElevenLabs, Soniox는 한국어 realtime 전사와 timestamp 요구를 충족해 최종 비교 대상으로 남겼다. Soniox는 word-level timestamp가 필수 요구가 될 때만 제외한다.
-
-최종 비교는 [STT 공급자 조사](stt-provider-research.md)의 동일 Korean meeting gold realtime run과 공급자 공식 문서(2026-09-20 확인)를 사용한다.
+최종적으로 **Speechmatics Enhanced realtime, ElevenLabs Scribe v2 Realtime, Soniox**를 비교한다. Speechmatics는 Pro, ElevenLabs는 Creator 요금제를 기준으로 한다.
 
 ---
 
 ## Decision Drivers
 
-- **한국어 회의 전사를 정확하게 만들 수 있는가?** 같은 realtime 입력과 gold에서 CER이 낮아야 이후 요약·질의응답·분석이 잘못된 전사에 기대지 않는다.
-- **필요한 기능을 포함한 실제 운영비를 감당할 수 있는가?** 시간당 사용료만 비교하지 않고, 사용할 유료 tier의 월 고정비와 포함 사용량, custom vocabulary와 화자분리의 추가비용까지 함께 본다.
-- **확정 전사 구간의 시간 정보를 만들 수 있는가?** 시작·종료 시점을 만들 수 있는 timestamp를 받아야 하며, word-level timestamp는 있으면 좋지만 필수 조건은 아니다.
-- **목표 동시 20개 회의를 운영할 수 있는가?** 동시성뿐 아니라 새 연결 rate limit, 최대 세션 시간, idle 종료 조건을 확인해 회의 중 예기치 않은 연결 종료를 줄인다.
-- **회의 고유명사를 전사에 반영할 수 있는가?** 제품명·인명·약어를 custom vocabulary로 주입할 수 있어야 하며, 지원 규모와 비용, 한국어에서의 실제 효과는 구분해 본다.
-- **live 결과에서 Speaker를 보존할 수 있는가?** provider의 raw speaker label을 받아 기존 전사 구간의 대표 Speaker로 정규화하되, 이를 Participant의 신원으로 취급하지 않는다.
+- **한국어 회의 내용을 정확하게 전사할 수 있는가?** 전사 품질은 이후에 이어지는 QnA·요약·분석 성능에 크게 영향을 미치므로, 실제 회의 녹음의 문자 오류율을 우선 비교한다.
+- **개발부터 운영까지 비용 부담이 적은가?** 시간당 요금과 함께 무료 크레딧, 월 구독료, 포함 사용량, 기능 추가 요금과 동시성 확대 비용을 비교한다.
+- **실시간 전사 timestamp 기능이 존재하는가?** 전사 구간의 시작·종료 시간을 구성할 수 있어야 한다. 단어별 시간 정보까지 제공하면 활용하기 좋지만 필수 조건은 아니다.
+- **동시에 20개 회의를 처리할 수 있는가?** 동시 연결 수와 새 연결 요청 제한을 확인하고, 회의 길이와 일시 정지를 감당할 수 있는지도 함께 본다.
+- **회의에서 사용하는 고유명사를 반영할 수 있는가?** custom vocabulary로 제품명·인명·약어를 전달할 수 있어야 하며, 등록 가능한 규모와 추가 비용을 비교한다.
+- **전사와 함께 화자 정보를 받을 수 있는가?** 실시간 화자분리를 제공하면 회의 중 발언자를 구분하는 데 활용할 수 있다.
 
 ---
 
 ## Considered Options
 
-### A. Speechmatics Enhanced realtime
+### A. Speechmatics Enhanced realtime — Pro
 
-final `AddTranscript`의 word timestamp와 `diarization: speaker`의 raw speaker label을 전사 구간에 정규화한다.
-
-**장점**
-
-- 같은 first-600초 실시간 gold에서 CER \*\*15.4791%\*\*로 세 후보 중 가장 낮았고 정상 완료했다.
-- word start/end와 live diarization을 한 WebSocket에서 받는다. `speaker_sensitivity`, `prefer_current_speaker`, `max_speakers`로 화자 분리 동작을 조정할 수 있다.
-- [`additional_vocab`](https://docs.speechmatics.com/speech-to-text/features/custom-dictionary)을 realtime에서 지원한다. job당 1,000개 이하 권장, 20,000개 초과 거부이며 `sounds_like` 발음 힌트를 제공한다.
-- [Pro는 $100 credit으로 시작하며](https://www.speechmatics.com/pricing), 월 약정 없이 사용량 후불이다. Enhanced realtime은 **$0.43/h**, 동시 realtime session은 **50개**다. 500 h/month 초과 사용량에는 20% 할인, model-training opt-in에는 33% 할인 선택지가 있다.
-- [최대 세션 48시간, audio 없음 1시간, audio와 ping/pong 모두 없음 3분](https://docs.speechmatics.com/speech-to-text/realtime/limits)이라는 종료 조건이 공개돼 있다.
-
-**단점**
-
-- 결승 후보 중 기본 시간당 단가는 가장 높다. 500 h/month 이하에서 100시간이면 $43이다.
-
-### B. ElevenLabs `scribe_v2_realtime`
-
-`committed_transcript`와 word timestamp를 받는다. realtime에 화자 필드가 없으므로 화자 정보가 필요하면 별도 diarization 경로를 추가해야 한다.
+실시간 전사와 단어별 시간 정보, 화자 라벨을 함께 제공한다.
 
 **장점**
 
-- 동일 조건 CER \*\*15.7599%\*\*로 정상 완료했다.
-- word-level timestamp를 제공한다.
-- [기본 realtime 사용료는 **$0.39/h**](https://elevenlabs.io/pricing/api?price.section=speech_to_text)다.
-- [Creator는 **$22/month**](https://elevenlabs.io/pricing/api?price.section=speech_to_text)이며 realtime STT **56시간**과 동시 **15개**를 제공한다.
+- **한국어 전사 성능이 좋다.** 회의 녹음 비교에서 CER은 \*\*15.48%\*\*였고 전사를 정상 완료했다.
+- **월 고정비 없이 20개 동시 회의를 수용한다.** Pro는 사용량 기반 요금제로 **$0.43/시간**, 동시 연결 **50개**를 제공한다. 신규 계정에는 **$100 크레딧**이 제공된다. [요금](https://www.speechmatics.com/pricing)
+- **장시간 회의를 지원한다.** 최대 세션은 **48시간**이다. 오디오가 없으면 1시간, 오디오와 ping/pong이 모두 없으면 3분 후 종료된다. [운영 한도](https://docs.speechmatics.com/speech-to-text/realtime/limits)
+- **회의 용어를 넉넉하게 등록할 수 있다.** custom dictionary는 **1,000개 이하를 권장**하며 발음 힌트도 지원한다. [Custom dictionary](https://docs.speechmatics.com/speech-to-text/features/custom-dictionary)
+- **시간 정보와 화자분리를 함께 제공한다.** 별도 호출 없이 단어별 시작·종료 시점과 화자 라벨을 받을 수 있다. [실시간 출력](https://docs.speechmatics.com/speech-to-text/realtime/output), [화자분리](https://docs.speechmatics.com/speech-to-text/realtime/realtime-diarization)
 
 **단점**
 
-- realtime diarization이 없다. 화자 정보에는 별도 diarization 단계가 필요하다.
-- keyterm은 realtime에서 최대 50개, 항목당 20자이고 **+$0.05/h**다. 켜면 $0.44/h가 되어 Speechmatics보다 비싸다.
-- [Creator의 동시성은 15개](https://elevenlabs.io/docs/help-center/product/core-capabilities/speech-to-text/how-many-speech-to-text-requests-can-i-make-and-can-i-increase-it)라 목표 20개 회의에 부족하다.
+- **기본 사용료가 다른 두 후보보다 높다.** 크레딧과 할인을 제외한 100시간 사용료는 **$43**이다.
 
-### C. Soniox `stt-rt-v5`
+### B. ElevenLabs Scribe v2 Realtime — Creator
 
-final token timestamp와 `enable_speaker_diarization`의 raw speaker label을 정규화한다.
+실시간 전사와 단어별 시간 정보를 제공한다. 화자분리는 실시간 API에 포함되지 않는다.
 
 **장점**
 
-- [비용은 **$0.12/h**](https://soniox.com/pricing)이며 diarization·context가 시간당 요금에 포함된다. `context`는 최대 8,000 tokens(약 10,000자)까지 제공한다.
-- live diarization과 timestamp를 제공한다.
-- [공개 기본 한도는 동시 10, 새 요청 100 RPM, 최대 300분](https://soniox.com/docs/stt/rt/limits-and-quotas)이다. 동시성·RPM 증액은 Console에서 요청할 수 있다.
+- **한국어 전사 성능이 좋다.** 회의 녹음 비교에서 CER은 \*\*15.76%\*\*였고 전사를 정상 완료했다.
+- **월 구독에 전사 사용량이 포함된다.** Creator는 **월 $22**, 첫 달은 **$11**이며, realtime STT **56시간**이 포함된다. 기본 시간당 요금은 **$0.39**다. 포함 시간은 구독에 따른 사용량이며 별도의 무료 크레딧은 아니다. [요금](https://elevenlabs.io/pricing/api?price.section=speech_to_text)
+- **단어별 시간 정보와 용어 주입을 지원한다.** keyterm은 최대 **50개**, 항목당 **20자**까지 등록할 수 있다. [Realtime API](https://elevenlabs.io/docs/api-reference/speech-to-text/v-1-speech-to-text-realtime), [Keyterm prompting](https://elevenlabs.io/docs/eleven-api/guides/how-to/speech-to-text/batch/keyterm-prompting)
 
 **단점**
 
-- 기본 동시성 10개는 목표 20개에 부족하다.
-- timestamp는 word 또는 sub-word token 단위다. 현재 요구는 충족하지만 word-level이 필요해지면 재검토해야 한다.
+- **Creator의 동시성으로는 목표를 충족하지 못한다.** 동시 연결은 **15개**다. 20개 회의를 수용하려면 상위 요금제 등 추가 조치가 필요하다. [동시성](https://elevenlabs.io/docs/help-center/product/core-capabilities/speech-to-text/how-many-speech-to-text-requests-can-i-make-and-can-i-increase-it)
+- **용어 주입에 추가 요금이 든다.** keyterm 사용 시 **$0.05/시간**이 추가돼 기본 전사 요금과 합하면 **$0.44/시간**이다. [요금](https://elevenlabs.io/pricing/api?price.section=speech_to_text)
+- **실시간 화자분리가 없다.** 회의 중 화자 정보가 필요하면 별도 처리가 필요하다.
+
+### C. Soniox
+
+실시간 전사와 token 단위 시간 정보, 화자 라벨을 제공한다.
+
+**장점**
+
+- **기본 전사 비용이 낮다.** 사용량 기반으로 약 **$0.12/시간**이며 화자분리는 별도 추가 요금 없이 제공한다. custom context는 입력 text token 사용량으로 과금한다. [요금](https://soniox.com/pricing)
+- **회의 용어와 배경 설명을 함께 전달할 수 있다.** context에 최대 **8,000 tokens**를 넣을 수 있다. [Context](https://soniox.com/docs/stt/concepts/context)
+- **시간 정보와 실시간 화자분리를 제공한다.** token별 시간 정보로 전사 구간의 시작·종료 시점을 구성할 수 있다. [Timestamps](https://soniox.com/docs/stt/concepts/timestamps), [화자분리](https://soniox.com/docs/stt/concepts/speaker-diarization)
+- **요청 한도가 명시돼 있다.** 새 요청은 **분당 100개**, 세션 길이는 최대 **300분**이다. [운영 한도](https://soniox.com/docs/stt/rt/limits-and-quotas)
+
+**단점**
+
+- **기본 동시성으로는 목표를 충족하지 못한다.** 동시 연결은 **10개**이며, 20개 회의를 수용하려면 Console에서 한도 상향을 요청해야 한다. [운영 한도](https://soniox.com/docs/stt/rt/limits-and-quotas)
+- **전사 실험에서 종료를 정상 완료하지 못했다.** 수신 결과의 CER은 \*\*16.01%\*\*였지만, 종료 과정에서 timeout이 발생했다.
 
 ---
 
 ## Decision
 
-**Speechmatics Enhanced realtime을 실시간 전사 STT 공급자로 사용한다.**
+**Speechmatics Pro의 Enhanced realtime을 사용한다.**
 
-- 한국어 동일 realtime gold에서 가장 낮은 CER을 기록하고 정상 완료했다.
-- Soniox는 시간당 비용과 vocabulary 규모에서 우수하지만, 종료 결과가 누락됐고 기본 동시성도 10개다. 정상 완료하고 Pro에서 50개 동시성을 제공하는 Speechmatics를 선택한다.
-- ElevenLabs는 기본 단가가 조금 낮지만 live diarization이 없어 구조와 비용이 추가된다. keyterm을 켜면 사용료도 Speechmatics보다 높다.
-- Speechmatics Pro는 월 고정 구독료 없이 $0.43/h PAYG로 50개 동시성을 제공한다.
+한국어 회의 전사 성능이 좋고, 월 고정 구독료 없이 목표인 20개 동시 회의를 수용한다. 단어별 시간 정보와 실시간 화자분리를 함께 제공하며, 회의 용어를 등록할 수 있는 규모도 충분하다.
+
+ElevenLabs Creator는 전사 성능이 비슷하지만 동시 연결이 15개이고 실시간 화자분리가 없다. Soniox는 비용이 가장 낮지만 동시성 확대가 필요하고, 전사 실험에서 종료 오류가 발생했다. 현재는 낮은 단가보다 필요한 동시성과 기능을 갖추고 정상 완료한 Speechmatics를 우선한다.
 
 ---
 
@@ -106,20 +98,20 @@ final token timestamp와 `enable_speaker_diarization`의 raw speaker label을 �
 
 ### Positive
 
-- 하나의 realtime 연결에서 확정 전사, timestamp, raw speaker label을 받는다.
-- 20개 동시 회의는 Pro의 공개 한도 50 안에 있다.
-- custom dictionary로 대규모 용어 목록을 전사에 반영할 수 있다.
+- 별도 동시성 증액 협의 없이 20개 회의를 처리할 수 있다.
+- 전사·시간 정보·실시간 화자 라벨을 한 공급자에서 받는다.
+- 초기 크레딧으로 개발 비용을 줄이고, 이후에는 사용량에 따라 비용을 지불한다.
+- 회의별 고유명사와 기술 용어를 전사에 반영할 수 있다.
 
 ### Negative
 
-- 사용량이 늘면 Soniox 대비 비용 차이가 커진다.
-- word의 raw speaker label은 사람 이름이나 Participant가 아니다. 기존 전사 구간을 유지한 채 대표 Speaker 한 명으로 정규화하는 규칙이 필요하다.
+- 사용 시간이 늘어날수록 Soniox와의 비용 차이가 커진다.
+- 공급자의 화자 라벨을 서비스의 전사 구간에 연결하는 처리는 필요하다.
 
 ---
 
 ## Reconsideration Conditions
 
-- Soniox가 누락 없이 완료되고 20개 동시성을 지원하면 비용과 안정성을 다시 비교한다.
-- Speechmatics의 전사 또는 화자분리 품질이 회의 사용에 문제가 되면 대안을 다시 비교한다.
-- 목표 동시 회의가 50개를 넘거나 새 연결 RPM 제한이 실제 병목이면 Enterprise 협의 또는 다른 공급자를 재검토한다.
-- word-level timestamp가 필수 요구로 바뀌면 Soniox를 제외하고 다시 비교한다.
+- 실제 회의에서 전사 정확도나 용어 인식이 서비스 사용에 지장을 주면 대안을 재검토한다.
+- 동시 회의가 50개를 넘거나 요청 제한이 병목이 되면 한도 확대와 공급자 변경을 비교한다.
+- 사용량 증가나 요금 변경으로 전사 비용 부담이 커지면 요금제와 공급자를 다시 검토한다.
