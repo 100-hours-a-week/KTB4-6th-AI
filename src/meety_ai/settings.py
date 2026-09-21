@@ -20,8 +20,14 @@ class Settings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
 
     # 공급자 키는 MEETY_ 접두사를 쓰지 않으므로 환경변수 이름을 명시한다.
-    # 값은 SecretStr이라 repr/str과 로그에 원문이 남지 않으며, 키가 없어도 앱은 뜬다.
+    # 값은 SecretStr이라 repr/str과 로그에 원문이 남지 않는다.
     # 단, ValidationError.errors()/json()은 include_input=False로 호출해야 원문이 빠진다.
     speechmatics_api_key: SecretStr | None = Field(
         default=None, validation_alias="SPEECHMATICS_API_KEY"
     )
+
+
+class LiveSettings(Settings):
+    """실시간 서비스에 필요한 설정."""
+
+    speechmatics_api_key: SecretStr = Field(validation_alias="SPEECHMATICS_API_KEY")

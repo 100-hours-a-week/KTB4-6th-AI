@@ -5,7 +5,7 @@ from threading import Event
 
 import pytest
 from fastapi.testclient import TestClient
-from starlette.testclient import WebSocketDenialResponse
+from pydantic import ValidationError
 from starlette.websockets import WebSocketDisconnect
 
 import meety_ai.recording.router as router_module
@@ -26,18 +26,14 @@ meta_message = {"type": "audio.meta", "payload": {"sequence": 0}}
 stop_message = {"type": "session.stop", "requestId": "stop-01"}
 
 
-def test_missing_provider_key_rejects_connection():
-    app = create_live_app()
-    app.state.settings.speechmatics_api_key = None
+def test_missing_provider_key_prevents_live_app_start(monkeypatch, tmp_path):
+    monkeypatch.delenv("SPEECHMATICS_API_KEY")
+    monkeypatch.chdir(tmp_path)
 
-    with TestClient(app) as client:
-        with pytest.raises(WebSocketDenialResponse) as error:
-            with client.websocket_connect(WEBSOCKET_URL):
-                pass
+    with pytest.raises(ValidationError) as error:
+        create_live_app()
 
-    assert error.value.status_code == 503
-    assert error.value.json() == {"error": "service_unavailable"}
-    assert app.state.recording_connections == 0
+    assert error.value.errors(include_input=False)[0]["loc"] == ("SPEECHMATICS_API_KEY",)
 
 
 # 1. test_recording_flow

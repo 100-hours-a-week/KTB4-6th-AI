@@ -38,15 +38,9 @@ async def start_recording_session(websocket: WebSocket) -> None:
         )
         return
 
-    api_key = websocket.app.state.settings.speechmatics_api_key
-    if api_key is None:
-        await websocket.send_denial_response(
-            JSONResponse(content={"error": "service_unavailable"}, status_code=503)
-        )
-        return
-
     websocket.app.state.recording_connections += 1
 
+    api_key = websocket.app.state.settings.speechmatics_api_key
     transcript_queue: TranscriptQueue = asyncio.Queue()
     sender_task: asyncio.Task[None] | None = None
     background_error: Exception | None = None
