@@ -1,5 +1,6 @@
 """Backend와 주고받는 제어 메시지의 데이터 규약을 정의한다."""
 
+from datetime import datetime
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter
@@ -48,6 +49,21 @@ class SessionReady(Message):
     meeting_id: Identifier
     recording_session_id: Identifier
     payload: SessionReadyPayload
+
+
+class TranscriptCommittedPayload(Message):
+    sequence_number: Annotated[int, Field(ge=0)]
+    content: str
+    started_at_ms: Annotated[int, Field(ge=0)]
+    ended_at_ms: Annotated[int, Field(ge=0)]
+    recognized_at: datetime
+
+
+class TranscriptCommitted(Message):
+    type: Literal["transcript.committed"]
+    meeting_id: Identifier
+    recording_session_id: Identifier
+    payload: TranscriptCommittedPayload
 
 
 class AudioMetaPayload(Message):
@@ -117,6 +133,7 @@ class SessionErrorPayload(Message):
         "expected_binary",
         "message_too_large",
         "audio_decode_failed",
+        "provider_unavailable",
         "processing_timeout",
     ]
     message: str
