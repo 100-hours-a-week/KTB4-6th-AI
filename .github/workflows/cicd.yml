@@ -1,11 +1,11 @@
 # .github/workflows/cicd.yml
 # (deploy/** 브랜치 push → 테스트 → 이미지 push → OIDC로 AWS 인증 → SSM으로 EC2 배포)
 
-name: AI CI/CD (임시)
+name: AI CI/CD
 
 on:
   push:
-    branches: ['deploy/**']
+    branches: ['dev']
 
 permissions:
   contents: read
