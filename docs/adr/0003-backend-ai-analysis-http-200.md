@@ -8,7 +8,7 @@ Accepted
 ## Context
   
 Meety는 종료된 회의 전사를 바탕으로 요약, 팀 커뮤니케이션 리포트, 회의 지표를 생성함.
-대상 AI 서버 API는 `POST /summary`, `POST /report`, `POST /metric`이다. 이 작업들은 LLM
+대상 AI 서버 API는 `POST /v1/summary`, `POST /v1/report`, `POST /v1/metric`이다. 이 작업들은 LLM
 호출을 포함하므로 요청 완료 시간이 짧다고 보장할 수 없음.
 
 이 ADR의 범위는 **백엔드와 AI 서버 사이의 내부 통신**임. 브라우저·사용자 API는 이 ADR의 범위가 아님.
@@ -34,11 +34,11 @@ Meety는 종료된 회의 전사를 바탕으로 요약, 팀 커뮤니케이션 
 ## Considered Options
 
 ### 1. A: Backend worker가 동기 HTTP `200 OK`까지 대기
-백엔드는 `ai_requests`를 생성한 뒤 worker가 작업을 획득한다. worker는 전사 snapshot을 담아 AI 서버의 `/summary`, `/report`, `/metric`을 호출하고, AI 서버가 모델 생성을 끝낸 뒤 `200 OK` 본문으로 결과를 반환한다. worker는 결과를 백엔드 DB에 저장한다.
+백엔드는 `ai_requests`를 생성한 뒤 worker가 작업을 획득한다. worker는 전사 snapshot을 담아 AI 서버의 `/v1/summary`, `/v1/report`, `/v1/metric`을 호출하고, AI 서버가 모델 생성을 끝낸 뒤 `200 OK` 본문으로 결과를 반환한다. worker는 결과를 백엔드 DB에 저장한다.
 ```text
 Backend API → ai_requests = ACCEPTED → 사용자에게 202
 Backend worker → ai_requests = PROCESSING
-Backend worker ── POST /summary ──► AI Server
+Backend worker ── POST /v1/summary ──► AI Server
 Backend worker ◄─ 200 OK + result ── AI Server
 Backend worker → 결과 저장 → ai_requests = COMPLETED
 ```
@@ -58,7 +58,7 @@ Backend worker → 결과 저장 → ai_requests = COMPLETED
 백엔드는 AI 서버에 분석 요청을 보내고, AI 서버는 자체 queue에 job을 넣은 뒤 `202 Accepted`와 AI 서버 job ID를 반환한다. 완료 결과는 AI 서버가 백엔드 callback endpoint로 전송하거나, 백엔드가 AI 서버의 job 조회 endpoint를 polling한다.
 ```text
 
-Backend ── POST /summary ──► AI Server
+Backend ── POST /v1/summary ──► AI Server
 
 Backend ◄─ 202 Accepted + ai_job_id ── AI Server
 AI Server queue/worker → model generation
@@ -81,7 +81,7 @@ Backend ── GET /ai-jobs/{id} ──► AI Server
 - AI 서버의 책임이 모델 실행에서 job 플랫폼 운영으로 넓어진다.
 ---
 ## Decision
-**v1에서 `/summary`, `/report`, `/metric`은 backend worker가 호출하는 동기 HTTP API로 구현하고, AI 서버는 생성 결과를 `200 OK` 응답으로 반환한다.**
+**v1에서 `/v1/summary`, `/v1/report`, `/v1/metric`은 backend worker가 호출하는 동기 HTTP API로 구현하고, AI 서버는 생성 결과를 `200 OK` 응답으로 반환한다.**
 
 사용자에게 보이는 비동기성은 백엔드가 담당한다.
 ```text
@@ -89,7 +89,7 @@ Backend ── GET /ai-jobs/{id} ──► AI Server
 사용자 → Backend: 분석 생성 요청
 Backend → 사용자: 202 Accepted + ai_request_id
   
-Backend worker → AI Server: POST /summary, /report, /metric
+Backend worker → AI Server: POST /v1/summary, /v1/report, /v1/metric
 AI Server → Backend worker: 200 OK + 최종 결과
 ```
 선택 이유:
