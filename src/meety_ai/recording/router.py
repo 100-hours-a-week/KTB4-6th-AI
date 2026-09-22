@@ -3,9 +3,11 @@
 import asyncio
 import contextlib
 
+import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
+from structlog.contextvars import bind_contextvars
 
 from meety_ai.recording.decoder import AudioDecodeError
 from meety_ai.recording.schemas import (
@@ -20,6 +22,8 @@ from meety_ai.recording.session import RecordingSession, SessionProtocolError
 from meety_ai.recording.stt_client import SpeechmaticsClient, STTProviderError
 from meety_ai.recording.transcript import TranscriptMessage, TranscriptQueue, send_transcripts
 
+logger = structlog.stdlib.get_logger(__name__)
+
 recording_router = APIRouter()
 MAX_TEXT_SIZE = 4 * 1024
 MAX__RECORDING_CONNECTIONS = 20
@@ -30,6 +34,11 @@ STT_STOP_TIMEOUT = 30
 @recording_router.websocket("/v1/live-meeting")
 async def start_recording_session(websocket: WebSocket) -> None:
     if websocket.app.state.recording_connections >= MAX__RECORDING_CONNECTIONS:
+        logger.warning(
+            "recording_rejected",
+            reason="capacity_exceeded",
+            active_connections=websocket.app.state.recording_connections,
+        )
         await websocket.send_denial_response(
             JSONResponse(
                 content={"error": "capacity_exceeded"},
@@ -54,6 +63,8 @@ async def start_recording_session(websocket: WebSocket) -> None:
             background_error = error
 
     def on_provider_error(error: Exception) -> None:
+        # 백엔드에는 일반화한 메시지만 보내므로 원인 예외는 로그에만 남긴다.
+        logger.error("stt_provider_failed", exc_info=error)
         on_error(STTProviderError("음성 전사 공급자 연결 또는 처리에 실패했습니다."))
 
     def raise_background_error() -> None:
@@ -104,6 +115,12 @@ async def start_recording_session(websocket: WebSocket) -> None:
                     response = await session.handle_event(event)
 
                     if isinstance(event, SessionStart):
+                        # 이후 이 연결에서 남기는 로그에 회의 식별자를 함께 기록한다.
+                        bind_contextvars(
+                            meeting_id=event.meeting_id,
+                            recording_session_id=event.recording_session_id,
+                        )
+                        logger.info("session_started", audio_format=event.payload.audio_format)
                         await stt_client.start()
                         sender_task = asyncio.create_task(forward_transcripts(event))
 
@@ -122,6 +139,11 @@ async def start_recording_session(websocket: WebSocket) -> None:
                     await websocket.send_json(response.model_dump(by_alias=True))
 
                 if isinstance(response, SessionEnded):
+                    logger.info(
+                        "session_ended",
+                        last_sequence=response.payload.last_sequence,
+                        audio_duration_ms=response.payload.audio_duration_ms,
+                    )
                     await websocket.close(code=1000)
                     break
 
@@ -151,6 +173,9 @@ async def start_recording_session(websocket: WebSocket) -> None:
                 close_code = 1009
             elif code in ("audio_decode_failed", "processing_timeout", "provider_unavailable"):
                 close_code = 1011
+
+            log = logger.error if code == "provider_unavailable" else logger.warning
+            log("session_failed", code=code, close_code=close_code, request_id=request_id)
 
             response = SessionError(
                 type="error",
