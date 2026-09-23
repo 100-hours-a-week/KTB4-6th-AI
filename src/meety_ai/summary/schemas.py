@@ -42,6 +42,6 @@ class SummaryRequest(Message):
     title: str
     purpose: str
     note: str
-    meeting_started_at: datetime
+    meeting_started_at: Annotated[datetime, Field(strict=False)]
     speakers: list[Speaker]
     segments: Annotated[list[TranscriptionSegment], Field(min_length=1)]
