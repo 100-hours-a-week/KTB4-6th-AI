@@ -25,9 +25,20 @@ class Settings(BaseSettings):
     speechmatics_api_key: SecretStr | None = Field(
         default=None, validation_alias="SPEECHMATICS_API_KEY"
     )
+    openrouter_api_key: SecretStr | None = Field(
+        default=None, validation_alias="OPENROUTER_API_KEY"
+    )
+    summary_model: str = "openai/gpt-6-luna"
+    summary_timeout_seconds: float = Field(default=120.0, gt=0)
 
 
 class LiveSettings(Settings):
     """실시간 서비스에 필요한 설정."""
 
     speechmatics_api_key: SecretStr = Field(validation_alias="SPEECHMATICS_API_KEY")
+
+
+class AnalysisSettings(Settings):
+    """분석 서비스에 필요한 설정."""
+
+    openrouter_api_key: SecretStr = Field(validation_alias="OPENROUTER_API_KEY")
