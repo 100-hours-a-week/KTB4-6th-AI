@@ -1,0 +1,189 @@
+# .github/workflows/cicd.yml
+# (deploy/** 브랜치 push → 테스트 → 이미지 push → OIDC로 AWS 인증 → SSM으로 EC2 배포)
+
+name: AI CI/CD
+
+on:
+  push:
+    branches: ['dev']
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: ${{ vars.DOCKERHUB_USERNAME }}/meety-ai
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ffmpeg 설치
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --all-extras --dev
+      - run: uv run pytest
+      - name: Discord 알림 (테스트 실패)
+        if: failure()
+        run: |
+          curl -H "Content-Type: application/json" -X POST -d "{\"content\": \"❌ [테스트 실패] ${{ github.repository }}\nBranch: ${{ github.ref_name }} (${{ github.sha }})\nAuthor: ${{ github.actor }}\nFailed Job: test\nError Message: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" "${{ secrets.DISCORD_WEBHOOK_URL }}"
+
+  deploy-modal:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    concurrency:
+      group: deploy-modal
+      cancel-in-progress: false
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+    steps:
+      - name: 배포 시크릿 검증
+        run: |
+          [ -n "$MODAL_TOKEN_ID" ]     || { echo "::error::secrets.MODAL_TOKEN_ID 가 비어 있습니다"; exit 1; }
+          [ -n "$MODAL_TOKEN_SECRET" ] || { echo "::error::secrets.MODAL_TOKEN_SECRET 이 비어 있습니다"; exit 1; }
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --no-dev
+      # 화자 분리 함수를 등록만 하며, GPU 컨테이너는 호출될 때만 실행된다.
+      - name: Modal 화자 분리 함수 배포
+        run: uv run modal deploy -m meety_ai.diarization.modal_app
+      - name: Discord 알림 (Modal 배포 실패)
+        if: failure()
+        run: |
+          curl -H "Content-Type: application/json" -X POST -d "{\"content\": \"❌ [Modal 배포 실패] ${{ github.repository }}\nBranch: ${{ github.ref_name }} (${{ github.sha }})\nAuthor: ${{ github.actor }}\nFailed Job: deploy-modal\nError Message: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" "${{ secrets.DISCORD_WEBHOOK_URL }}"
+
+  docker-build:
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.vars.outputs.sha_short }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: vars
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - id: login
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Discord 알림 (Docker Hub 인증 실패)
+        if: failure() && steps.login.outcome == 'failure'
+        run: |
+          curl -H "Content-Type: application/json" -X POST -d "{\"content\": \"❌ [Docker Hub 인증 실패] ${{ github.repository }}\nBranch: ${{ github.ref_name }} (${{ github.sha }})\nAuthor: ${{ github.actor }}\nFailed Job: docker-build(login)\nError Message: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" "${{ secrets.DISCORD_WEBHOOK_URL }}"
+      - id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: ${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Discord 알림 (이미지 빌드 실패)
+        if: failure() && steps.push.outcome == 'failure'
+        run: |
+          curl -H "Content-Type: application/json" -X POST -d "{\"content\": \"❌ [이미지 빌드 실패] ${{ github.repository }}\nBranch: ${{ github.ref_name }} (${{ github.sha }})\nAuthor: ${{ github.actor }}\nFailed Job: docker-build(push)\nError Message: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" "${{ secrets.DISCORD_WEBHOOK_URL }}"
+
+  deploy:
+    needs: [docker-build, deploy-modal]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+    concurrency:
+      group: deploy-ai
+      cancel-in-progress: false
+    env:
+      IMAGE_TAG: ${{ needs.docker-build.outputs.image_tag }}
+      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}     # OIDC로 Assume할 IAM Role ARN (BE/FE와 동일 Role 공유)
+      INSTANCE_ID: ${{ secrets.AI_INSTANCE_ID }}    # ai-v1-meety 의 Instance ID
+      DEPLOY_DIR: ${{ secrets.AI_DEPLOY_DIR }}      # 서버의 docker-compose.yml 디렉터리
+    steps:
+      - name: 배포 시크릿 검증
+        run: |
+          [ -n "$AWS_ROLE_ARN" ] || { echo "::error::secrets.AWS_ROLE_ARN 이 비어 있습니다"; exit 1; }
+          [ -n "$INSTANCE_ID" ]  || { echo "::error::secrets.AI_INSTANCE_ID 가 비어 있습니다"; exit 1; }
+          [ -n "$DEPLOY_DIR" ]   || { echo "::error::secrets.AI_DEPLOY_DIR 이 비어 있습니다"; exit 1; }
+
+      - name: AWS 인증 (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-2
+          role-session-name: gha-ai-deploy-${{ github.run_id }}
+          role-skip-session-tagging: true
+
+      - name: SSM 배포 명령 전송
+        id: send
+        run: |
+          cat > remote.sh <<EOF
+          #!/bin/bash
+          set -euo pipefail
+          cd "${DEPLOY_DIR}"
+
+          # .env 의 이미지 태그를 갱신
+          if grep -q '^AI_IMAGE_TAG=' .env; then
+            sed -i "s|^AI_IMAGE_TAG=.*|AI_IMAGE_TAG=${IMAGE_TAG}|" .env
+          else
+            echo "AI_IMAGE_TAG=${IMAGE_TAG}" >> .env
+          fi
+
+          # ai-live/ai-analysis가 같은 이미지를 command만 다르게 써서 공유하므로 둘 다 재생성
+          docker compose pull ai-live ai-analysis
+          docker compose up -d --no-deps --wait --wait-timeout 180 ai-live ai-analysis
+
+          docker image prune -f
+          EOF
+
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --comment "deploy ai ${IMAGE_TAG} (run ${{ github.run_id }})" \
+            --timeout-seconds 60 \
+            --parameters "$(jq -Rs '{commands: split("\n"), executionTimeout: ["600"]}' remote.sh)" \
+            --query "Command.CommandId" --output text)
+
+          echo "command_id=$COMMAND_ID" >> "$GITHUB_OUTPUT"
+          echo "SSM Command ID: $COMMAND_ID"
+
+      - name: SSM 실행 결과 대기
+        env:
+          COMMAND_ID: ${{ steps.send.outputs.command_id }}
+        run: |
+          STATUS="Pending"
+          for i in $(seq 1 120); do
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" \
+              --query "Status" --output text 2>/dev/null || echo "Pending")
+            case "$STATUS" in
+              Pending|InProgress|Delayed) sleep 5 ;;
+              *) break ;;
+            esac
+          done
+
+          echo "::group::서버 stdout"
+          aws ssm get-command-invocation --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" \
+            --query "StandardOutputContent" --output text || true
+          echo "::endgroup::"
+          echo "::group::서버 stderr"
+          aws ssm get-command-invocation --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" \
+            --query "StandardErrorContent" --output text || true
+          echo "::endgroup::"
+
+          echo "최종 상태: $STATUS"
+          [ "$STATUS" = "Success" ] || { echo "::error::SSM 배포 실패 (status=$STATUS)"; exit 1; }
+
+      - name: Discord 알림 (배포 실패)
+        if: failure()
+        run: |
+          curl -H "Content-Type: application/json" -X POST -d "{\"content\": \"❌ [배포 실패] ${{ github.repository }}\nBranch: ${{ github.ref_name }} (${{ github.sha }})\nAuthor: ${{ github.actor }}\nFailed Job: deploy\nImage Tag: ${{ env.IMAGE_TAG }}\nError Message: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" "${{ secrets.DISCORD_WEBHOOK_URL }}"

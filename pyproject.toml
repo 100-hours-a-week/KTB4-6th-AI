@@ -6,7 +6,10 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "fastapi>=0.141.1",
+    "langchain-openai>=1.6.4",
+    "modal>=1.5.5",
     "pydantic-settings>=2.15.0",
+    "speechmatics-rt>=1.1.1",
     "structlog>=26.1.0",
     "uvicorn[standard]>=0.53.0",
 ]

@@ -1,14 +1,51 @@
-"""Process configuration; no provider credentials are needed yet."""
+"""프로세스 설정. 공급자 API 키는 `.env`의 기존 이름(접두사 없음)을 그대로 읽는다."""
 
 from typing import Literal
 
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_prefix="MEETY_", env_file=".env", env_file_encoding="utf-8", extra="forbid"
+        env_prefix="MEETY_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="forbid",
+        # 미정의 .env 항목이 거부될 때 오류 메시지에 값 원문이 찍히지 않게 한다.
+        hide_input_in_errors=True,
     )
 
     environment: Literal["local", "test", "production"] = "local"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+
+    # 공급자 키는 MEETY_ 접두사를 쓰지 않으므로 환경변수 이름을 명시한다.
+    # 값은 SecretStr이라 repr/str과 로그에 원문이 남지 않는다.
+    # 단, ValidationError.errors()/json()은 include_input=False로 호출해야 원문이 빠진다.
+    speechmatics_api_key: SecretStr | None = Field(
+        default=None, validation_alias="SPEECHMATICS_API_KEY"
+    )
+    openrouter_api_key: SecretStr | None = Field(
+        default=None, validation_alias="OPENROUTER_API_KEY"
+    )
+    # 로컬 개발은 ~/.modal.toml 로그인으로도 호출할 수 있어 선택값으로 둔다.
+    modal_token_id: str | None = Field(default=None, validation_alias="MODAL_TOKEN_ID")
+    modal_token_secret: SecretStr | None = Field(
+        default=None, validation_alias="MODAL_TOKEN_SECRET"
+    )
+    summary_model: str = "openai/gpt-6-luna"
+    summary_timeout_seconds: float = Field(default=120.0, gt=0)
+    # Modal 함수 자체 제한(3600초)과 맞춘 SDK 호출 대기 시간이다.
+    diarization_timeout_seconds: float = Field(default=3600.0, gt=0)
+
+
+class LiveSettings(Settings):
+    """실시간 서비스에 필요한 설정."""
+
+    speechmatics_api_key: SecretStr = Field(validation_alias="SPEECHMATICS_API_KEY")
+
+
+class AnalysisSettings(Settings):
+    """분석 서비스에 필요한 설정."""
+
+    openrouter_api_key: SecretStr = Field(validation_alias="OPENROUTER_API_KEY")
