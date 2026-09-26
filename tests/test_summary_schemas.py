@@ -59,3 +59,33 @@ def test_empty_transcript_segment_request():
         SummaryRequest.model_validate_json(json.dumps(payload))
 
     assert error.value.errors()[0]["loc"] == ("segments",)
+
+
+def test_summary_regeneration_request():
+    payload = {
+            "requestId": "req-1",
+            "meetingId": 42,
+            "title": "주간 회의",
+            "purpose": "진행 상황 공유",
+            "note": "다음 일정 확인",
+            "meetingStartedAt": "2026-09-22T10:00:00+09:00",
+            "speakers": [
+                {"speakerId": 1, "teamMemberId": 7, "displayName": "홍길동"},
+            ],
+            "segments": [
+                {
+                    "segmentId": 1,
+                    "speakerId": 1,
+                    "sequenceNumber": 0,
+                    "content": "진행 상황을 공유하겠습니다. 오늘은 요약 기능 스키마를 구현했습니다.",
+                    "startedAtMs": 0,
+                    "endedAtMs": 1800,
+                },
+            ],
+            "previousSummary": "요약 기능을 전부 구현함",
+            "regenerationReason": "전부가 아닌 스키마만 구현함"
+        }
+    
+    request = SummaryRequest.model_validate_json(json.dumps(payload))
+
+    assert request.model_dump(by_alias=True, mode="json") == payload

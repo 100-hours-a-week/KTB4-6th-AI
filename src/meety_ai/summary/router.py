@@ -23,6 +23,8 @@ async def generate_summary(payload: SummaryRequest, request: Request) -> Respons
                 "purpose": payload.purpose,
                 "note": payload.note,
                 "transcript": transcript,
+                "previous_summary": payload.previous_summary,
+                "regeneration_reason": payload.regeneration_reason,
             }
         )
     except APITimeoutError as exc:
