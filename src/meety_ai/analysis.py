@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from langchain_openai import ChatOpenAI
 
 from meety_ai.app import create_app
+from meety_ai.diarization.router import diarization_router
 from meety_ai.settings import AnalysisSettings
 from meety_ai.summary.chain import create_summary_chain
 from meety_ai.summary.router import summary_router
@@ -21,4 +22,5 @@ def create_analysis_app() -> FastAPI:
     )
     app.state.summary_chain = create_summary_chain(model)
     app.include_router(summary_router)
+    app.include_router(diarization_router)
     return app
