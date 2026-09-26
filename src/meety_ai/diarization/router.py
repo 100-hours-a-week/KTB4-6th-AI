@@ -25,7 +25,7 @@ _MODAL_ERROR_STATUS = {"download_failed": 502, "decode_failed": 422, "inference_
 class SpeakerInterval(TypedDict):
     """Modal이 반환한 화자 구간. 참가자와 연결되지 않은 회의 내 화자 ID다."""
 
-    speaker_id: str
+    speaker_id: int
     start_ms: int
     end_ms: int
 
@@ -74,9 +74,9 @@ async def diarize(audio_url: str, timeout_seconds: float) -> list[SpeakerInterva
         raise HTTPException(status_code=502, detail={"errorCode": "invalid_response"}) from None
 
 
-def _merge_by_speaker(intervals: list[SpeakerInterval]) -> dict[str, list[tuple[int, int]]]:
+def _merge_by_speaker(intervals: list[SpeakerInterval]) -> dict[int, list[tuple[int, int]]]:
     """같은 화자의 겹치는 구간을 합쳐 겹침 시간이 두 번 더해지지 않게 한다."""
-    merged: dict[str, list[tuple[int, int]]] = {}
+    merged: dict[int, list[tuple[int, int]]] = {}
     for item in sorted(intervals, key=lambda i: i["start_ms"]):
         spans = merged.setdefault(item["speaker_id"], [])
         if spans and item["start_ms"] <= spans[-1][1]:

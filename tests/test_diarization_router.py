@@ -13,13 +13,13 @@ from meety_ai.settings import Settings
 # 준비: create_app("analysis", Settings(_env_file=None))에 diarization_router를 붙인다.
 #       router 모듈이 쓰는 modal.Function.from_name을 가짜로 바꾼다.
 #       가짜는 계약 형식의 성공 결과를 돌려준다:
-#       {"status": "ok", "intervals": [SPEAKER_00 0~2000ms, SPEAKER_01 1500~5000ms]}
+#       {"status": "ok", "intervals": [화자 0 0~2000ms, 화자 1 1500~5000ms]}
 #       겹치는 구간을 일부러 넣는다. 받은 audio_url도 기록해 둔다.
 # 실행: POST /v1/diarization, camelCase 본문으로
 #       requestId, meetingId, audioUrl("https://...?X-Amz-Signature=..."),
 #       segments 2개(0~1800ms, 2000~5000ms)를 보낸다.
 # 기대 결과: 200 응답, meetingId가 그대로 오고,
-#       segments[0].speakerId == "SPEAKER_00", segments[1].speakerId == "SPEAKER_01"이며
+#       segments[0].speakerId == 0, segments[1].speakerId == 1이며
 #       나머지 필드는 요청과 같다. 가짜 Modal 함수가 요청의 audioUrl로 한 번 호출되었다.
 # 실패 조건: Modal 결과 파싱, 겹침 시간 계산, 대표 화자 선택, 응답 alias(camelCase)
 #       변환 중 하나라도 깨지면 실패해야 한다.
@@ -32,8 +32,8 @@ def test_diarization_route_attributes_speakers_from_modal_intervals(monkeypatch)
             return {
                 "status": "ok",
                 "intervals": [
-                    {"speaker_id": "SPEAKER_00", "start_ms": 0, "end_ms": 2000},
-                    {"speaker_id": "SPEAKER_01", "start_ms": 1500, "end_ms": 5000},
+                    {"speaker_id": 0, "start_ms": 0, "end_ms": 2000},
+                    {"speaker_id": 1, "start_ms": 1500, "end_ms": 5000},
                 ],
             }
 
@@ -66,8 +66,8 @@ def test_diarization_route_attributes_speakers_from_modal_intervals(monkeypatch)
     assert response.json() == {
         "meetingId": 42,
         "segments": [
-            {**segments[0], "speakerId": "SPEAKER_00"},
-            {**segments[1], "speakerId": "SPEAKER_01"},
+            {**segments[0], "speakerId": 0},
+            {**segments[1], "speakerId": 1},
         ],
     }
     assert calls == [audio_url]

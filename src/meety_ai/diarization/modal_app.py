@@ -36,7 +36,7 @@ def to_intervals(segments: list[dict]) -> list[dict]:
     """모델 구간(초)을 계약 형식(ms)으로 바꾸고, 겹침은 유지한 채 시작 시각순으로 정렬한다."""
     intervals = [
         {
-            "speaker_id": f"SPEAKER_{int(item['Speaker']):02d}",
+            "speaker_id": int(item["Speaker"]),
             "start_ms": round(float(item["Start"]) * 1000),
             "end_ms": round(float(item["End"]) * 1000),
         }

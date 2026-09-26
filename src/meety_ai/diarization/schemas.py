@@ -28,7 +28,7 @@ class DiarizationRequest(Message):
 
 class AttributedSegment(DiarizationSegment):
     # 판단할 수 없으면 임의의 화자 대신 null
-    speaker_id: str | None
+    speaker_id: int | None
 
 
 class DiarizationResponse(Message):
