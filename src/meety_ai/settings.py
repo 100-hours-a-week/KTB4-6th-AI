@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     openrouter_api_key: SecretStr | None = Field(
         default=None, validation_alias="OPENROUTER_API_KEY"
     )
+    # 로컬 개발은 ~/.modal.toml 로그인으로도 호출할 수 있어 선택값으로 둔다.
+    modal_token_id: str | None = Field(default=None, validation_alias="MODAL_TOKEN_ID")
+    modal_token_secret: SecretStr | None = Field(
+        default=None, validation_alias="MODAL_TOKEN_SECRET"
+    )
     summary_model: str = "openai/gpt-6-luna"
     summary_timeout_seconds: float = Field(default=120.0, gt=0)
     # Modal 함수 자체 제한(3600초)과 맞춘 SDK 호출 대기 시간이다.
