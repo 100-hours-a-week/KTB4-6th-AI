@@ -30,6 +30,35 @@ jobs:
         run: |
           curl -H "Content-Type: application/json" -X POST -d "{\"content\": \"❌ [테스트 실패] ${{ github.repository }}\nBranch: ${{ github.ref_name }} (${{ github.sha }})\nAuthor: ${{ github.actor }}\nFailed Job: test\nError Message: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" "${{ secrets.DISCORD_WEBHOOK_URL }}"
 
+  deploy-modal:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    concurrency:
+      group: deploy-modal
+      cancel-in-progress: false
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+    steps:
+      - name: 배포 시크릿 검증
+        run: |
+          [ -n "$MODAL_TOKEN_ID" ]     || { echo "::error::secrets.MODAL_TOKEN_ID 가 비어 있습니다"; exit 1; }
+          [ -n "$MODAL_TOKEN_SECRET" ] || { echo "::error::secrets.MODAL_TOKEN_SECRET 이 비어 있습니다"; exit 1; }
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --no-dev
+      # 화자 분리 함수를 등록만 하며, GPU 컨테이너는 호출될 때만 실행된다.
+      - name: Modal 화자 분리 함수 배포
+        run: uv run modal deploy -m meety_ai.diarization.modal_app
+      - name: Discord 알림 (Modal 배포 실패)
+        if: failure()
+        run: |
+          curl -H "Content-Type: application/json" -X POST -d "{\"content\": \"❌ [Modal 배포 실패] ${{ github.repository }}\nBranch: ${{ github.ref_name }} (${{ github.sha }})\nAuthor: ${{ github.actor }}\nFailed Job: deploy-modal\nError Message: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" "${{ secrets.DISCORD_WEBHOOK_URL }}"
+
   docker-build:
     needs: test
     runs-on: ubuntu-latest
@@ -64,7 +93,7 @@ jobs:
           curl -H "Content-Type: application/json" -X POST -d "{\"content\": \"❌ [이미지 빌드 실패] ${{ github.repository }}\nBranch: ${{ github.ref_name }} (${{ github.sha }})\nAuthor: ${{ github.actor }}\nFailed Job: docker-build(push)\nError Message: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" "${{ secrets.DISCORD_WEBHOOK_URL }}"
 
   deploy:
-    needs: docker-build
+    needs: [docker-build, deploy-modal]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: production
