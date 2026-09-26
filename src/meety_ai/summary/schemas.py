@@ -29,7 +29,8 @@ class Speaker(Message):
 
 class TranscriptionSegment(Message):
     segment_id: int
-    speaker_id: int
+    # 화자 분리에서 대표 화자를 판단할 수 없던 구간은 null이다.
+    speaker_id: int | None
     sequence_number: Annotated[int, Field(ge=0)]
     content: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
     started_at_ms: int

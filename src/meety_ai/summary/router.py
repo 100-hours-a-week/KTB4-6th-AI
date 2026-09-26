@@ -12,6 +12,7 @@ async def generate_summary(payload: SummaryRequest, request: Request) -> Respons
         speaker.speaker_id: speaker.display_name or f"화자 {speaker.speaker_id}"
         for speaker in payload.speakers
     }
+    speaker_names[None] = "미확인 화자"
     transcript = "\n".join(
         f"{speaker_names.get(segment.speaker_id, f'화자 {segment.speaker_id}')}: {segment.content}"
         for segment in payload.segments
