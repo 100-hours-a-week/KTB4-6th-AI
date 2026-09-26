@@ -122,6 +122,7 @@ async def start_recording_session(websocket: WebSocket) -> None:
                         )
                         logger.info("session_started", audio_format=event.payload.audio_format)
                         await stt_client.start()
+                        # @debt
                         sender_task = asyncio.create_task(forward_transcripts(event))
 
                     if isinstance(event, SessionStop):

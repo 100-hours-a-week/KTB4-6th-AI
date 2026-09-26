@@ -45,3 +45,9 @@ class SummaryRequest(Message):
     meeting_started_at: Annotated[datetime, Field(strict=False)]
     speakers: list[Speaker]
     segments: Annotated[list[TranscriptionSegment], Field(min_length=1)]
+    previous_summary: (
+        Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)] | None
+    ) = Field(default=None, exclude_if=lambda value: value is None)
+    regeneration_reason: (
+        Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)] | None
+    ) = Field(default=None, exclude_if=lambda value: value is None)

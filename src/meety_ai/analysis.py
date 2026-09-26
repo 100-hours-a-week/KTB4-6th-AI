@@ -17,6 +17,7 @@ def create_analysis_app() -> FastAPI:
         api_key=settings.openrouter_api_key,
         base_url="https://openrouter.ai/api/v1",
         timeout=settings.summary_timeout_seconds,
+        max_retries=0,
     )
     app.state.summary_chain = create_summary_chain(model)
     app.include_router(summary_router)
