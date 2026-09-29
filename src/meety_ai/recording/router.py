@@ -82,7 +82,9 @@ async def start_recording_session(websocket: WebSocket) -> None:
         except Exception as error:
             on_error(error)
 
-    stt_client = SpeechmaticsClient(
+    # 부하테스트 진입점은 app.state에 가짜 클라이언트를 넣는다.
+    stt_client_factory = getattr(websocket.app.state, "stt_client_factory", SpeechmaticsClient)
+    stt_client = stt_client_factory(
         api_key=api_key.get_secret_value(),
         on_transcript=on_transcript,
         on_error=on_provider_error,
