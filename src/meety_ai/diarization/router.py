@@ -122,7 +122,9 @@ async def generate_diarization(request: Request) -> DiarizationResponse:
     except ValidationError as exc:
         detail = exc.errors(include_url=False, include_context=False, include_input=False)
         raise HTTPException(status_code=422, detail=detail) from None
-    intervals = await diarize(
+    # 부하테스트 진입점은 app.state에 가짜 화자 분리를 넣는다.
+    diarize_audio = getattr(request.app.state, "diarize", diarize)
+    intervals = await diarize_audio(
         payload.audio_url, request.app.state.settings.diarization_timeout_seconds
     )
     return DiarizationResponse(
