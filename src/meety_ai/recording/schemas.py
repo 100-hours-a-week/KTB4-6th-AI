@@ -23,8 +23,7 @@ Identifier = Annotated[
 ]
 
 
-class SessionStartPayload(Message):
-    audio_format: Literal["webm_opus", "mp4_aac"]
+AudioFormat = Literal["webm_opus", "mp4_aac"]
 
 
 class SessionStart(Message):
@@ -32,12 +31,10 @@ class SessionStart(Message):
     request_id: Identifier
     meeting_id: Identifier
     recording_session_id: Identifier
-    payload: SessionStartPayload
 
 
 class SessionReadyPayload(Message):
     status: Literal["READY"]
-    input_audio_format: Literal["webm_opus", "mp4_aac"]
     output_audio_format: Literal["pcm_s16le"]
     output_sample_rate_hz: Literal[16000]
     output_channels: Literal[1]
@@ -49,6 +46,27 @@ class SessionReady(Message):
     meeting_id: Identifier
     recording_session_id: Identifier
     payload: SessionReadyPayload
+
+
+class DecoderResetPayload(Message):
+    audio_format: AudioFormat
+
+
+class DecoderReset(Message):
+    type: Literal["decoder.reset"]
+    request_id: Identifier
+    payload: DecoderResetPayload
+
+
+class DecoderReadyPayload(Message):
+    status: Literal["READY"]
+    input_audio_format: AudioFormat
+
+
+class DecoderReady(Message):
+    type: Literal["decoder.ready"]
+    request_id: Identifier
+    payload: DecoderReadyPayload
 
 
 class TranscriptCommittedPayload(Message):
@@ -147,7 +165,7 @@ class SessionError(Message):
 
 
 ClientEvent = Annotated[
-    SessionStart | AudioMeta | SessionPause | SessionResume | SessionStop,
+    SessionStart | DecoderReset | AudioMeta | SessionPause | SessionResume | SessionStop,
     Field(discriminator="type"),
 ]
 
