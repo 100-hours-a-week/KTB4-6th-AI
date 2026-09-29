@@ -28,7 +28,6 @@ class Settings(BaseSettings):
     openrouter_api_key: SecretStr | None = Field(
         default=None, validation_alias="OPENROUTER_API_KEY"
     )
-    # 로컬 개발은 ~/.modal.toml 로그인으로도 호출할 수 있어 선택값으로 둔다.
     modal_token_id: str | None = Field(default=None, validation_alias="MODAL_TOKEN_ID")
     modal_token_secret: SecretStr | None = Field(
         default=None, validation_alias="MODAL_TOKEN_SECRET"
@@ -49,3 +48,5 @@ class AnalysisSettings(Settings):
     """분석 서비스에 필요한 설정."""
 
     openrouter_api_key: SecretStr = Field(validation_alias="OPENROUTER_API_KEY")
+    modal_token_id: str = Field(validation_alias="MODAL_TOKEN_ID")
+    modal_token_secret: SecretStr = Field(validation_alias="MODAL_TOKEN_SECRET")
