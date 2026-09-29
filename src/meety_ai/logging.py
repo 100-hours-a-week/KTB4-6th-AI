@@ -45,3 +45,5 @@ def configure_logging(level: str, *, production: bool = False) -> None:
         logger.addHandler(handler)
         logger.setLevel(level)
         logger.propagate = False
+    # 요청 완료 로그는 LogContextMiddleware가 구조화 필드로 남기므로 access 로그는 끈다.
+    logging.getLogger("uvicorn.access").disabled = True
