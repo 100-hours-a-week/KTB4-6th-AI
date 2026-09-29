@@ -19,20 +19,8 @@ start_message = {
     "requestId": "start-01",
     "meetingId": "meeting-01",
     "recordingSessionId": "recording-01",
-}
-
-reset_message = {
-    "type": "decoder.reset",
-    "requestId": "reset-01",
     "payload": {"audioFormat": "webm_opus"},
 }
-reset_ready = {
-    "type": "decoder.ready",
-    "requestId": "reset-01",
-    "payload": {"status": "READY", "inputAudioFormat": "webm_opus"},
-}
-# 스트림 첫 8바이트 헤더 검사를 통과하도록 가짜 청크 앞에 붙이는 webm EBML magic
-WEBM_HEAD = b"\x1a\x45\xdf\xa3"
 
 meta_message = {"type": "audio.meta", "payload": {"sequence": 0}}
 stop_message = {"type": "session.stop", "requestId": "stop-01"}
@@ -66,16 +54,15 @@ def test_recording_flow(fake_decoders):
                 "recordingSessionId": "recording-01",
                 "payload": {
                     "status": "READY",
+                    "inputAudioFormat": "webm_opus",
                     "outputAudioFormat": "pcm_s16le",
                     "outputSampleRateHz": 16000,
                     "outputChannels": 1,
                 },
             }
-            ws.send_json(reset_message)
-            assert ws.receive_json() == reset_ready
 
             ws.send_json(meta_message)
-            ws.send_bytes(WEBM_HEAD + b"audio chunk")
+            ws.send_bytes(b"audio chunk")
             ws.send_json(stop_message)
             ended = ws.receive_json()
             assert ended == {
@@ -95,7 +82,7 @@ def test_recording_flow(fake_decoders):
             assert error.value.code == 1000
 
         assert len(fake_decoders) == 1
-        assert fake_decoders[0].fed == [WEBM_HEAD + b"audio chunk"]
+        assert fake_decoders[0].fed == [b"audio chunk"]
         assert fake_decoders[0].closed
 
 
@@ -112,7 +99,7 @@ def test_recording_flow(fake_decoders):
         pytest.param("{", id="malformed-json"),
         pytest.param('{"type": "unknown"}', id="unknown-event"),
         pytest.param(
-            json.dumps({**reset_message, "payload": {"audioFormat": "mp3"}}),
+            json.dumps({**start_message, "payload": {"audioFormat": "mp3"}}),
             id="invalid-payload",
         ),
     ],
@@ -131,7 +118,10 @@ def test_invalid_json(bad_message, fake_decoders):
                 ws.receive_json()
             assert error.value.code == 1008
 
-        assert fake_decoders == []
+        assert len(fake_decoders) == 1
+        assert not fake_decoders[0].started
+        assert fake_decoders[0].fed == []
+        assert fake_decoders[0].closed
 
 
 # 3. test_audio_message_order
@@ -162,8 +152,6 @@ def test_audio_message_order(fake_decoders):
             ws.send_json(start_message)
             ready = ws.receive_json()
             assert ready["type"] == "session.ready"
-            ws.send_json(reset_message)
-            assert ws.receive_json() == reset_ready
             ws.send_json(meta_message)
             ws.send_json(stop_message)
             response = ws.receive_json()
@@ -202,6 +190,7 @@ def test_connections_are_isolated_on_disconnect(fake_decoders):
                         "requestId": "start-01",
                         "meetingId": "meeting-01",
                         "recordingSessionId": "recording-01",
+                        "payload": {"audioFormat": "webm_opus"},
                     }
                 )
                 ready_a = ws_a.receive_json()
@@ -212,6 +201,7 @@ def test_connections_are_isolated_on_disconnect(fake_decoders):
                     "recordingSessionId": "recording-01",
                     "payload": {
                         "status": "READY",
+                        "inputAudioFormat": "webm_opus",
                         "outputAudioFormat": "pcm_s16le",
                         "outputSampleRateHz": 16000,
                         "outputChannels": 1,
@@ -224,6 +214,7 @@ def test_connections_are_isolated_on_disconnect(fake_decoders):
                         "requestId": "start-02",
                         "meetingId": "meeting-02",
                         "recordingSessionId": "recording-02",
+                        "payload": {"audioFormat": "webm_opus"},
                     }
                 )
                 ready_b = ws_b.receive_json()
@@ -234,22 +225,18 @@ def test_connections_are_isolated_on_disconnect(fake_decoders):
                     "recordingSessionId": "recording-02",
                     "payload": {
                         "status": "READY",
+                        "inputAudioFormat": "webm_opus",
                         "outputAudioFormat": "pcm_s16le",
                         "outputSampleRateHz": 16000,
                         "outputChannels": 1,
                     },
                 }
 
-                ws_a.send_json(reset_message)
-                assert ws_a.receive_json() == reset_ready
-                ws_b.send_json(reset_message)
-                assert ws_b.receive_json() == reset_ready
-
                 ws_a.send_json(meta_message)
                 ws_b.send_json(meta_message)
 
-                ws_a.send_bytes(WEBM_HEAD + b"chunk a")
-                ws_b.send_bytes(WEBM_HEAD + b"chunk b")
+                ws_a.send_bytes(b"chunk a")
+                ws_b.send_bytes(b"chunk b")
 
                 ws_a.send_json({"type": "session.pause", "requestId": "pause-01"})
                 paused_a = ws_a.receive_json()
@@ -263,8 +250,8 @@ def test_connections_are_isolated_on_disconnect(fake_decoders):
                 ws_b.send_bytes(b"chunk b1")
 
             # A는 stop 없이 끊긴 상태 (with문 바깥)
-            decoder_a, decoder_b = fake_decoders
-            assert decoder_a.fed == [WEBM_HEAD + b"chunk a"]
+            decoder_b, decoder_a = fake_decoders
+            assert decoder_a.fed == [b"chunk a"]
             assert decoder_a.closed
             assert not decoder_b.closed
 
@@ -288,7 +275,7 @@ def test_connections_are_isolated_on_disconnect(fake_decoders):
                 ws_b.receive_json()
             assert error.value.code == 1000
 
-        assert decoder_b.fed == [WEBM_HEAD + b"chunk b", b"chunk b1", b"chunk b2"]
+        assert decoder_b.fed == [b"chunk b", b"chunk b1", b"chunk b2"]
         assert decoder_b.closed
 
 
@@ -312,8 +299,6 @@ def test_live_meeting_with_real_ffmpeg(audio_samples):
             ws.send_json(start_message)
             ready = ws.receive_json()
             assert ready["type"] == "session.ready"
-            ws.send_json(reset_message)
-            assert ws.receive_json() == reset_ready
 
             chunks = [encoded[i : i + CHUNK_SIZE] for i in range(0, len(encoded), CHUNK_SIZE)]
             for i, chunk in enumerate(chunks):
@@ -329,52 +314,6 @@ def test_live_meeting_with_real_ffmpeg(audio_samples):
             with pytest.raises(WebSocketDisconnect) as error:
                 ws.receive_json()
             assert error.value.code == 1000
-
-
-# #41: 녹음 스트림마다 디코더 교체
-
-
-# 테스트 이름: test_decoder_swap_keeps_session
-# 목적: 한 세션에서 형식이 다른 스트림을 이어 보내도 STT 입력(PCM)과 순번이 이어지는지 보호한다.
-# 준비: 실제 ffmpeg, audio_samples의 webm_opus·mp4_aac 샘플, 가짜 STT 클라이언트.
-# 준비: webm 첫 청크는 Chrome처럼 1바이트로 보내 헤더 판별이 여러 청크를 모으는지 확인한다.
-# 실행: start → reset(webm_opus) → meta/binary...
-# 실행: → reset(mp4_aac) → meta/binary(순번 이어서) → stop.
-# 기대 결과: decoder.ready가 각 형식을 되돌려주고, STT가 받은 PCM 길이가 두 기준 PCM의 합과 같고,
-# 기대 결과: ended.lastSequence가 마지막 순번이다.
-# 실패 조건: 교체 때 이전 스트림 끝부분이 유실되거나, 순번이 초기화되거나,
-# 실패 조건: 두 번째 스트림이 디코딩되지 않을 때.
-def test_decoder_swap_keeps_session(audio_samples, fake_speechmatics_client):
-    webm, webm_pcm = audio_samples["webm_opus"]
-    mp4, mp4_pcm = audio_samples["mp4_aac"]
-    webm_chunks = [webm[:1]] + [webm[i : i + CHUNK_SIZE] for i in range(1, len(webm), CHUNK_SIZE)]
-    mp4_chunks = [mp4[i : i + CHUNK_SIZE] for i in range(0, len(mp4), CHUNK_SIZE)]
-
-    with TestClient(create_live_app()) as client:
-        with client.websocket_connect(WEBSOCKET_URL) as ws:
-            ws.send_json(start_message)
-            assert ws.receive_json()["type"] == "session.ready"
-
-            sequence = 0
-            for audio_format, chunks in (("webm_opus", webm_chunks), ("mp4_aac", mp4_chunks)):
-                ws.send_json({**reset_message, "payload": {"audioFormat": audio_format}})
-                ready = ws.receive_json()
-                assert ready["type"] == "decoder.ready"
-                assert ready["payload"]["inputAudioFormat"] == audio_format
-
-                for chunk in chunks:
-                    ws.send_json({"type": "audio.meta", "payload": {"sequence": sequence}})
-                    ws.send_bytes(chunk)
-                    sequence += 1
-
-            ws.send_json(stop_message)
-            ended = ws.receive_json()
-            assert ended["type"] == "session.ended"
-            assert ended["payload"]["lastSequence"] == sequence - 1
-
-    pcm_bytes = sum(len(chunk) for chunk in fake_speechmatics_client[0].fed)
-    assert pcm_bytes == len(webm_pcm) + len(mp4_pcm)
-    assert ended["payload"]["audioDurationMs"] == pcm_bytes // 32
 
 
 # #18: 녹음 종료 전 확정 전사 전달
@@ -403,11 +342,9 @@ def test_committed_transcript_arrives_before_stop(fake_decoders, fake_speechmati
             ws.send_json(start_message)
             ready = ws.receive_json()
             assert ready["type"] == "session.ready"
-            ws.send_json(reset_message)
-            assert ws.receive_json() == reset_ready
 
             ws.send_json(meta_message)
-            ws.send_bytes(WEBM_HEAD + b"compressed audio")
+            ws.send_bytes(b"compressed audio")
 
             # STT 연결이 없다면 receive_json()에서 무한 대기하므로 먼저 배선을 확인한다.
             assert len(fake_speechmatics_client) == 1
@@ -484,8 +421,6 @@ def test_provider_disconnect_before_next_audio(
             ws.send_json(start_message)
             ready = ws.receive_json()
             assert ready["type"] == "session.ready"
-            ws.send_json(reset_message)
-            assert ws.receive_json() == reset_ready
             provider = fake_speechmatics_client[0]
             assert not provider.closed
             assert fake_decoders[0].started
@@ -529,8 +464,6 @@ def test_final_transcript_precedes_session_ended(fake_decoders, fake_speechmatic
         with client.websocket_connect(WEBSOCKET_URL) as ws:
             ws.send_json(start_message)
             assert ws.receive_json()["type"] == "session.ready"
-            ws.send_json(reset_message)
-            assert ws.receive_json() == reset_ready
 
             provider = fake_speechmatics_client[0]
 
@@ -583,8 +516,6 @@ def test_stop_timeout_cleans_up_session(fake_decoders, fake_speechmatics_client,
         with client.websocket_connect(WEBSOCKET_URL) as ws:
             ws.send_json(start_message)
             assert ws.receive_json()["type"] == "session.ready"
-            ws.send_json(reset_message)
-            assert ws.receive_json() == reset_ready
 
             provider = fake_speechmatics_client[0]
 
@@ -647,5 +578,6 @@ def test_transcript_send_failure_stops_receiving(
 
         provider = fake_speechmatics_client[0]
         assert provider.closed
-        assert fake_decoders == []
+        assert fake_decoders[0].fed == []
+        assert fake_decoders[0].closed
         assert app.state.recording_connections == 0
