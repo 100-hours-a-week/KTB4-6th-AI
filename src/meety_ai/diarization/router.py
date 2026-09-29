@@ -1,10 +1,12 @@
 import asyncio
+import time
 from typing import TypedDict
 
 import modal
 import structlog
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import TypeAdapter, ValidationError, with_config
+from structlog.contextvars import bind_contextvars
 
 from meety_ai.diarization.schemas import (
     AttributedSegment,
@@ -38,25 +40,36 @@ async def diarize(audio_url: str, timeout_seconds: float) -> list[SpeakerInterva
 
     예외 메시지에 URL이 섞일 수 있어 로그에는 예외 타입만 남긴다.
     """
+    started = time.perf_counter()
     try:
         # 함수 조회도 SDK 호출이므로 인증·미배포 오류를 같은 경계에서 처리한다.
         function = modal.Function.from_name("meety-diarization", "diarize")
         async with asyncio.timeout(timeout_seconds):
             result = await function.remote.aio(audio_url)
+        # Modal 호출 소요 시간은 성공·실패 로그에 공통으로 남긴다.
+        duration_ms = round((time.perf_counter() - started) * 1000)
     except (TimeoutError, modal.exception.TimeoutError) as exc:
-        logger.warning("diarization_timeout", error_type=type(exc).__name__)
+        logger.warning(
+            "diarization_timeout",
+            error_type=type(exc).__name__,
+            duration_ms=round((time.perf_counter() - started) * 1000),
+        )
         raise HTTPException(
             status_code=504, detail="화자 분리 응답 시간이 초과되었습니다."
         ) from None
     except modal.exception.Error as exc:
-        logger.warning("diarization_call_failed", error_type=type(exc).__name__)
+        logger.warning(
+            "diarization_call_failed",
+            error_type=type(exc).__name__,
+            duration_ms=round((time.perf_counter() - started) * 1000),
+        )
         raise HTTPException(status_code=502, detail="화자 분리 호출에 실패했습니다.") from None
 
     if isinstance(result, dict) and result.get("status") == "error":
         error_code = result.get("error_code")
         if error_code not in _MODAL_ERROR_STATUS:
             error_code = "unknown"
-        logger.warning("diarization_failed", error_code=error_code)
+        logger.warning("diarization_failed", error_code=error_code, duration_ms=duration_ms)
         raise HTTPException(
             status_code=_MODAL_ERROR_STATUS.get(error_code, 502),
             detail={"errorCode": error_code},
@@ -68,6 +81,12 @@ async def diarize(audio_url: str, timeout_seconds: float) -> list[SpeakerInterva
         intervals = _INTERVALS.validate_python(result["intervals"])
         if any(item["start_ms"] >= item["end_ms"] for item in intervals):
             raise ValueError("화자 구간의 시작 시각은 종료 시각보다 빨라야 합니다.")
+        logger.info(
+            "diarization_completed",
+            duration_ms=duration_ms,
+            interval_count=len(intervals),
+            speaker_count=len({item["speaker_id"] for item in intervals}),
+        )
         return intervals
     except (TypeError, KeyError, ValueError) as exc:
         logger.warning("diarization_invalid_response", error_type=type(exc).__name__)
@@ -122,6 +141,8 @@ async def generate_diarization(request: Request) -> DiarizationResponse:
     except ValidationError as exc:
         detail = exc.errors(include_url=False, include_context=False, include_input=False)
         raise HTTPException(status_code=422, detail=detail) from None
+    # 이 요청의 이후 로그를 회의 식별자로 조회할 수 있게 한다.
+    bind_contextvars(meeting_id=payload.meeting_id)
     # 부하테스트 진입점은 app.state에 가짜 화자 분리를 넣는다.
     diarize_audio = getattr(request.app.state, "diarize", diarize)
     intervals = await diarize_audio(
