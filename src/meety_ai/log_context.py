@@ -1,10 +1,12 @@
 """HTTP 요청과 WebSocket 연결별로 로그 문맥을 분리한다."""
 
 import re
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from uuid import uuid4
 
+import structlog
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from structlog.contextvars import (
     bind_contextvars,
@@ -12,6 +14,8 @@ from structlog.contextvars import (
     clear_contextvars,
     get_contextvars,
 )
+
+logger = structlog.stdlib.get_logger(__name__)
 
 _REQUEST_ID_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,128}")
 
@@ -57,8 +61,13 @@ class LogContextMiddleware:
             # 연결 식별자와 개별 질문·작업의 요청 식별자는 구분한다.
             bind_contextvars(service=self.service, connection_id=uuid4().hex)
 
+        started = time.perf_counter()
+        status = 500  # 응답을 시작하지 못하고 예외로 끝나면 서버 오류로 기록한다.
+
         async def send_with_request_id(message: Message) -> None:
+            nonlocal status
             if scope["type"] == "http" and message["type"] == "http.response.start":
+                status = message["status"]
                 headers = [
                     (key, value)
                     for key, value in message.get("headers", [])
@@ -71,5 +80,15 @@ class LogContextMiddleware:
         try:
             await self.app(scope, receive, send_with_request_id)
         finally:
+            # 헬스체크는 주기적으로 반복돼 로그 비용만 늘리므로 제외한다.
+            # 쿼리 문자열에는 비밀값이 섞일 수 있어 path만 남긴다.
+            if scope["type"] == "http" and scope["path"] != "/healthz":
+                logger.info(
+                    "http_request_completed",
+                    method=scope["method"],
+                    path=scope["path"],
+                    status=status,
+                    duration_ms=round((time.perf_counter() - started) * 1000),
+                )
             clear_contextvars()
             bind_contextvars(**previous)

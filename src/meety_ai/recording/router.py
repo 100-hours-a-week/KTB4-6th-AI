@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import time
 
 import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -82,13 +83,19 @@ async def start_recording_session(websocket: WebSocket) -> None:
         except Exception as error:
             on_error(error)
 
-    stt_client = SpeechmaticsClient(
+    # 부하테스트 진입점은 app.state에 가짜 클라이언트를 넣는다.
+    stt_client_factory = getattr(websocket.app.state, "stt_client_factory", SpeechmaticsClient)
+    stt_client = stt_client_factory(
         api_key=api_key.get_secret_value(),
         on_transcript=on_transcript,
         on_error=on_provider_error,
     )
 
     session = RecordingSession(stt_client.send_audio)
+    started = time.perf_counter()
+    # 사유를 확인하지 못한 채 끝나면(예상하지 못한 예외 등) 오류로 기록한다.
+    close_reason: str | None = None
+    audio_bytes = 0
     try:
         await websocket.accept()
         try:
@@ -103,6 +110,7 @@ async def start_recording_session(websocket: WebSocket) -> None:
                 raise_background_error()
 
                 if data["type"] == "websocket.disconnect":
+                    close_reason = "client_disconnect"
                     break
 
                 response = None
@@ -134,6 +142,7 @@ async def start_recording_session(websocket: WebSocket) -> None:
                             raise_background_error()
 
                 elif data.get("bytes") is not None:
+                    audio_bytes += len(data["bytes"])
                     await session.handle_binary(data["bytes"])
 
                 if response is not None:
@@ -146,6 +155,7 @@ async def start_recording_session(websocket: WebSocket) -> None:
                         audio_duration_ms=response.payload.audio_duration_ms,
                     )
                     await websocket.close(code=1000)
+                    close_reason = "normal"
                     break
 
         except (
@@ -175,8 +185,16 @@ async def start_recording_session(websocket: WebSocket) -> None:
             elif code in ("audio_decode_failed", "processing_timeout", "provider_unavailable"):
                 close_code = 1011
 
+            close_reason = "error"
             log = logger.error if code == "provider_unavailable" else logger.warning
-            log("session_failed", code=code, close_code=close_code, request_id=request_id)
+            # ValidationError 등의 메시지에는 입력 원문이 섞일 수 있어 예외 타입만 남긴다.
+            log(
+                "session_failed",
+                code=code,
+                close_code=close_code,
+                request_id=request_id,
+                error_type=type(error).__name__,
+            )
 
             response = SessionError(
                 type="error",
@@ -187,9 +205,16 @@ async def start_recording_session(websocket: WebSocket) -> None:
             await websocket.close(code=close_code)
 
     except WebSocketDisconnect:
-        pass
+        # 오류 응답을 보내다 끊긴 경우는 오류 사유를 유지한다.
+        close_reason = close_reason or "client_disconnect"
 
     finally:
+        logger.info(
+            "session_closed",
+            reason=close_reason or "error",
+            duration_ms=round((time.perf_counter() - started) * 1000),
+            audio_bytes=audio_bytes,
+        )
         try:
             if sender_task is not None:
                 sender_task.cancel()

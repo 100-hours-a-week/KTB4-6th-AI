@@ -4,6 +4,13 @@ import asyncio
 import contextlib
 from collections.abc import Awaitable, Callable
 
+import structlog
+
+logger = structlog.stdlib.get_logger(__name__)
+
+# ffmpeg 오류 원인 확인용으로 stderr 마지막 부분만 보관한다.
+MAX_STDERR_BYTES = 2048
+
 
 class AudioDecodeError(Exception):
     """디코더 프로세스의 입력·출력 실패를 호출자에게 알린다."""
@@ -15,11 +22,18 @@ class AudioDecoder:
         self._proc: asyncio.subprocess.Process | None = None
         self._reader: asyncio.Task[None] | None = None
         self._pcm_bytes = 0
+        self._stderr_reader: asyncio.Task[None] | None = None
+        self._stderr = b""
 
     async def _read_pcm(self) -> None:
         while chunk := await self._proc.stdout.read(65536):
             self._pcm_bytes += len(chunk)
             await self._on_pcm(chunk)
+
+    async def _read_stderr(self) -> None:
+        # 파이프가 차서 ffmpeg가 멈추지 않도록 끝까지 읽되 마지막 부분만 남긴다.
+        while chunk := await self._proc.stderr.read(4096):
+            self._stderr = (self._stderr + chunk)[-MAX_STDERR_BYTES:]
 
     async def start(self) -> None:
         """ffmpeg 프로세스를 생성해 입출력을 연결한다."""
@@ -38,8 +52,10 @@ class AudioDecoder:
             "pipe:1",  # stdout으로 16kHz mono s16le PCM을 내보낸다.
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
         self._reader = asyncio.create_task(self._read_pcm())
+        self._stderr_reader = asyncio.create_task(self._read_stderr())
 
     async def feed(self, chunk: bytes) -> None:
         """압축 음성 청크를 디코더 입력에 순서대로 전달한다."""
@@ -72,7 +88,24 @@ class AudioDecoder:
             self._reader.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._reader  # 취소 완료 대기 + 남은 예외 회수
-        if self._proc is not None and self._proc.returncode is None:
+        if self._proc is None:
+            return
+        # 강제 종료 전 종료코드로 ffmpeg 자체 실패와 정리 목적의 kill을 구분한다.
+        returncode = self._proc.returncode
+        if returncode is None:
             with contextlib.suppress(ProcessLookupError):
                 self._proc.kill()
             await self._proc.wait()
+        stderr_reader, self._stderr_reader = self._stderr_reader, None
+        if stderr_reader is None:
+            return  # 이미 정리했다.
+        with contextlib.suppress(Exception):
+            await stderr_reader
+        if returncode not in (None, 0) or self._stderr:
+            # stderr는 표준 입력 파이프 기준 메시지라 회의 내용·주소가 들어가지 않는다.
+            logger.warning(
+                "ffmpeg_failed",
+                returncode=returncode,
+                pcm_bytes=self._pcm_bytes,
+                stderr=self._stderr.decode("utf-8", "replace"),
+            )
