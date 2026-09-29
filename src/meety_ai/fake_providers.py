@@ -107,10 +107,10 @@ def fake_chat_model(latency_seconds: float) -> Runnable:
 class FakeLatencySettings(BaseSettings):
     """가짜 공급자별 응답 지연.
 
-    운영 Settings가 MEETY_ 접두사의 미정의 항목을 거부하므로 FAKE_ 접두사를 쓴다.
+    운영 Settings는 .env의 미정의 항목을 거부하므로 .env 파일이 아닌 환경 변수로만 읽는다.
     """
 
-    model_config = SettingsConfigDict(env_prefix="FAKE_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="FAKE_")
 
     stt_latency_ms: int = Field(default=0, ge=0)
     summary_latency_ms: int = Field(default=0, ge=0)
