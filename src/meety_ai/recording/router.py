@@ -12,6 +12,7 @@ from structlog.contextvars import bind_contextvars
 
 from meety_ai.recording.decoder import AudioDecodeError
 from meety_ai.recording.schemas import (
+    DecoderReset,
     SessionEnded,
     SessionError,
     SessionErrorPayload,
@@ -128,10 +129,13 @@ async def start_recording_session(websocket: WebSocket) -> None:
                             meeting_id=event.meeting_id,
                             recording_session_id=event.recording_session_id,
                         )
-                        logger.info("session_started", audio_format=event.payload.audio_format)
+                        logger.info("session_started")
                         await stt_client.start()
                         # @debt
                         sender_task = asyncio.create_task(forward_transcripts(event))
+
+                    if isinstance(event, DecoderReset):
+                        logger.info("decoder_reset", audio_format=event.payload.audio_format)
 
                     if isinstance(event, SessionStop):
                         async with asyncio.timeout(STT_STOP_TIMEOUT):
