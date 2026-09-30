@@ -12,8 +12,7 @@ def test_valid_session_start():
         "type": "session.start",
         "requestId": "req-1",
         "meetingId": "meeting-42",
-        "recordingSessionId": "recording-88",
-        "payload": {"audioFormat": "webm_opus"}
+        "recordingSessionId": "recording-88"
     }"""
 
     event = client_event_adapter.validate_json(raw)
@@ -24,18 +23,18 @@ def test_valid_session_start():
     assert event.recording_session_id == "recording-88"
 
 
-# 잘못된 시작 요청이 시스템 안으로 들어오는 것을 막는다.
-def test_invalid_session_start():
+# 지원하지 않는 녹음 형식의 스트림 시작 요청이 시스템 안으로 들어오는 것을 막는다.
+def test_invalid_decoder_reset():
     raw = """{
-        "type": "session.start",
-        "requestId": "req-1",
-        "meetingId": "meeting-42",
-        "recordingSessionId": "recording-88",
+        "type": "decoder.reset",
+        "requestId": "reset-1",
         "payload": {"audioFormat": "mp3"}
     }"""
 
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError) as error:
         client_event_adapter.validate_json(raw)
+
+    assert error.value.errors()[0]["loc"] == ("decoder.reset", "payload", "audioFormat")
 
 
 # sequence의 정수·범위 계약을 보호한다.

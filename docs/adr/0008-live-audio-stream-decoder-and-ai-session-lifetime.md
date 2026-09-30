@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted
 
 ---
 
@@ -62,13 +62,13 @@ FE가 다시 연결되면 BE가 기존 AI 연결을 닫고 새 AI 연결에서 `
 
 ### B. AI 세션을 유지하고 녹음 스트림마다 디코더를 교체한다
 
-BE–AI 연결과 AI 세션(STT·화자 분리 세션 포함)은 녹음 시작부터 녹음 종료까지 하나로 유지한다. FE가 다시 연결되면 BE는 기존 AI 연결에 오디오 청크를 다시 전송한다. **새 스트림의 첫 청크에는 BE가** `audio.meta.stream_start: true`**를 붙이고, AI는 기존 ffmpeg를** `finish()`**한 뒤 새 ffmpeg 프로세스를 띄운다.**
+BE–AI 연결과 AI 세션(STT·화자 분리 세션 포함)은 녹음 시작부터 녹음 종료까지 하나로 유지한다. FE가 다시 연결되면 BE는 기존 AI 연결에 오디오 청크를 다시 전송한다. **BE는 새 스트림의 오디오를 보내기 전에** `decoder.reset`**을 보내고, AI는 기존 ffmpeg를** `finish()`**한 뒤 새 ffmpeg 프로세스를 띄워** `decoder.ready`**로 응답한다.**
 
 ```text
 [AI 세션 하나: STT·화자 분리 세션 유지]
  스트림1 → ffmpeg #1 ─┐
  스트림2 → ffmpeg #2 ─┼→ PCM → STT(+화자 분리)
- 스트림3 → ffmpeg #3 ─┘   (stream_start마다 교체)
+ 스트림3 → ffmpeg #3 ─┘   (decoder.reset마다 교체)
 ```
 
 **장점**
@@ -111,9 +111,13 @@ BE–AI 연결과 AI 세션(STT·화자 분리 세션 포함)은 녹음 시작�
 세부 규칙은 다음과 같다.
 
 - **스트림 단위**: FE–BE WebSocket 연결 하나에 MediaRecorder 하나, AI 디코더 하나가 대응한다.
-- **일시정지**: FE는 PATCH PAUSED 후 MediaRecorder를 `stop()`하고, 마지막 청크를 보낸 뒤 FE–BE WebSocket을 닫는다. 재개하면 새 MediaRecorder와 새 WebSocket을 연다. 일시정지와 재연결이 같은 경로가 된다.
-- **스트림 경계 신호**: BE가 새 FE WebSocket 세션의 첫 청크에 `audio.meta.stream_start: true`를 붙인다. FE→BE 프로토콜은 바꾸지 않는다.
-- **검증**: AI는 스트림 앞 8바이트를 모은 뒤 헤더 여부를 판별하고, `stream_start`와 일치하지 않으면 프로토콜 오류로 처리한다. Chrome webm은 첫 청크가 1바이트뿐이라 첫 청크 하나로 판별하면 안 된다.
+- **일시정지**: FE는 PATCH PAUSED 후 MediaRecorder를 `stop()`하고, 마지막 청크를 보낸 뒤 FE–BE WebSocket을 닫는다. 재개하면 새 MediaRecorder와 새 WebSocket을 연다. 디코더 교체는 일시정지와 재연결이 같은 경로가 된다.
+- **일시정지 신호 유지**: BE–AI의 `session.pause`/`session.resume`은 유지한다. 사용자의 명시적인 정지·재개와 의도하지 않은 끊김·재연결을 AI가 구분할 수 있어야, 이후 정지 중 외부 API 연결 유지 등의 정책을 따로 정할 수 있다.
+- **스트림 경계 신호**: BE는 FE–BE WebSocket 핸드셰이크마다(첫 연결 포함) 기존 AI 연결에 `decoder.reset`을 보내고 `decoder.ready`를 받은 뒤 오디오를 전달한다. 재개할 때는 `session.resume` → `session.resumed` → `decoder.reset` → `decoder.ready` 순서다. FE→BE 프로토콜은 바꾸지 않는다.
+- **녹음 형식**: 스트림마다 형식이 바뀔 수 있으므로 `audioFormat`은 `session.start`가 아니라 `decoder.reset`의 payload로 전달한다.
+- **순서 보장**: BE는 이전 FE 세션의 청크를 모두 AI에 전달한 뒤 `decoder.reset`을 보낸다.
+- **이전 디코더 종료 실패**: `finish()`가 실패해도 STT 세션은 유지되므로 로그만 남기고 새 디코더로 교체한다.
+- **검증**: AI는 `decoder.reset` 뒤 스트림 앞 8바이트를 모은 뒤 `audioFormat`의 헤더와 일치하는지 판별하고, 일치하지 않으면 프로토콜 오류로 처리한다. Chrome webm은 첫 청크가 1바이트뿐이라 첫 청크 하나로 판별하면 안 된다.
 
 - **`audio.meta.sequence`**: AI 세션 안에서 계속 증가하며 스트림이 바뀌어도 초기화하지 않는다.
 
@@ -129,8 +133,8 @@ BE–AI 연결과 AI 세션(STT·화자 분리 세션 포함)은 녹음 시작�
 
 ### Negative
 
-- FE-BE 핸드셰이크에서 기존 AI 연결 재사용(없거나 닫혔을 때만 새로 시작), 같은 녹음의 새 FE 연결로 기존 연결 대체 등의 BE 추가 작업이 필요하다.
-- 재개할 때 WebSocket 핸드셰이크와 ffmpeg 시작 latency가 추가된다.
+- FE-BE 핸드셰이크에서 기존 AI 연결 재사용(없거나 닫혔을 때만 새로 시작), 같은 녹음의 새 FE 연결로 기존 연결 대체, `decoder.reset` 전송 등의 BE 추가 작업이 필요하다.
+- 재개할 때 WebSocket 핸드셰이크, `decoder.reset` 왕복, 이전 ffmpeg 종료와 새 ffmpeg 시작 latency가 추가된다.
 - 스트림 경계마다 코덱 패딩(AAC priming, opus pre-skip)이 몇 ms씩 들어간다. 녹음 파일과 STT가 같은 바이트를 디코딩하므로 둘 사이의 시간은 어긋나지 않는다.
 - FE가 끊긴 동안 STT 세션이 오디오 없이 열려 있다. 공급자의 무음 세션 유지 한도와 과금에 대한 확인과 처리가 필요하다.
 - AI 세션이 새로 열리는 경로(AI 장애, STT 오류, 장시간 끊김 timeout)에는 별도 처리가 필요하다.
