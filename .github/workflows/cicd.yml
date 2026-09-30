@@ -1,5 +1,5 @@
 # .github/workflows/cicd.yml
-# (dev/main push → 테스트 → 이미지 push → OIDC로 AWS 인증 → 환경별 EC2 배포)
+# (dev/main push(머지) → 테스트 → 이미지 push → OIDC로 AWS 인증 → 환경별 EC2 배포)
 
 name: AI 테스트·빌드 및 배포
 
