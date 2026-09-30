@@ -11,8 +11,9 @@ class Settings(BaseSettings):
         env_prefix="MEETY_",
         env_file=".env",
         env_file_encoding="utf-8",
-        extra="forbid",
-        # 미정의 .env 항목이 거부될 때 오류 메시지에 값 원문이 찍히지 않게 한다.
+        # LangSmith 등 SDK가 직접 읽는 환경변수는 앱 설정에서 무시한다.
+        extra="ignore",
+        # 설정 검증 오류에 비밀값 원문이 찍히지 않게 한다.
         hide_input_in_errors=True,
     )
 

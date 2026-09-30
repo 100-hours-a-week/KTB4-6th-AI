@@ -36,7 +36,14 @@ async def generate_summary(payload: SummaryRequest, request: Request) -> Respons
                 "transcript": transcript,
                 "previous_summary": payload.previous_summary,
                 "regeneration_reason": payload.regeneration_reason,
-            }
+            },
+            config={
+                "run_name": "meeting_summary",
+                "metadata": {
+                    "meeting_id": payload.meeting_id,
+                    "request_id": payload.request_id,
+                },
+            },
         )
     except Exception as exc:
         # 예외 메시지에 프롬프트·응답 일부가 섞일 수 있어 타입과 공급자 상태코드만 남긴다.
