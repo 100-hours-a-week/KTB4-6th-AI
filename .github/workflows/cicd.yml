@@ -1,11 +1,11 @@
 # .github/workflows/cicd.yml
-# (deploy/** 브랜치 push → 테스트 → 이미지 push → OIDC로 AWS 인증 → SSM으로 EC2 배포)
+# (dev/main push → 테스트 → 이미지 push → OIDC로 AWS 인증 → 환경별 EC2 배포)
 
 name: AI CI/CD
 
 on:
   push:
-    branches: ['dev']
+    branches: [dev, main]
 
 permissions:
   contents: read
@@ -34,18 +34,24 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    environment: production
+    # 각 환경의 Modal 토큰은 서로 다른 Workspace를 가리켜야 같은 앱 이름이 충돌하지 않는다.
+    environment:
+      name: ${{ github.ref_name == 'dev' && 'staging' || 'production' }}
     concurrency:
-      group: deploy-modal
+      group: deploy-modal-${{ github.ref_name }}
       cancel-in-progress: false
     env:
+      DEPLOY_ENV: ${{ github.ref_name == 'dev' && 'staging' || 'production' }}
       MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
     steps:
       - name: 배포 시크릿 검증
         run: |
+          # 로그에서 브랜치와 선택된 GitHub Environment를 확인한다.
+          echo "::notice::Modal 배포 대상: branch=${GITHUB_REF_NAME}, environment=${DEPLOY_ENV}"
           [ -n "$MODAL_TOKEN_ID" ]     || { echo "::error::secrets.MODAL_TOKEN_ID 가 비어 있습니다"; exit 1; }
           [ -n "$MODAL_TOKEN_SECRET" ] || { echo "::error::secrets.MODAL_TOKEN_SECRET 이 비어 있습니다"; exit 1; }
+          echo "::notice::Modal 배포 시크릿: MODAL_TOKEN_ID, MODAL_TOKEN_SECRET 설정됨"
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
         with:
@@ -63,11 +69,12 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     outputs:
-      image_tag: ${{ steps.vars.outputs.sha_short }}
+      image_tag: ${{ steps.vars.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
       - id: vars
-        run: echo "sha_short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+        # 전체 커밋 SHA로 환경별 배포 이미지를 정확히 식별한다.
+        run: echo "sha=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@v3
       - id: login
         uses: docker/login-action@v3
@@ -84,7 +91,7 @@ jobs:
           context: .
           push: true
           platforms: linux/amd64
-          tags: ${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }}
+          tags: ${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Discord 알림 (이미지 빌드 실패)
@@ -96,24 +103,30 @@ jobs:
     needs: [docker-build, deploy-modal]
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    environment: production
+    # dev는 스테이징 EC2, main은 운영 EC2를 선택한다.
+    environment:
+      name: ${{ github.ref_name == 'dev' && 'staging' || 'production' }}
     permissions:
       id-token: write
       contents: read
     concurrency:
-      group: deploy-ai
+      group: deploy-ai-${{ github.ref_name }}
       cancel-in-progress: false
     env:
+      DEPLOY_ENV: ${{ github.ref_name == 'dev' && 'staging' || 'production' }}
       IMAGE_TAG: ${{ needs.docker-build.outputs.image_tag }}
-      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}     # OIDC로 Assume할 IAM Role ARN (BE/FE와 동일 Role 공유)
-      INSTANCE_ID: ${{ secrets.AI_INSTANCE_ID }}    # ai-v1-meety 의 Instance ID
-      DEPLOY_DIR: ${{ secrets.AI_DEPLOY_DIR }}      # 서버의 docker-compose.yml 디렉터리
+      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}     # 선택된 환경에서 OIDC로 Assume할 IAM Role ARN
+      INSTANCE_ID: ${{ secrets.AI_INSTANCE_ID }}    # 선택된 환경의 AI EC2 Instance ID
+      DEPLOY_DIR: ${{ secrets.AI_DEPLOY_DIR }}      # 선택된 서버의 docker-compose.yml 디렉터리
     steps:
       - name: 배포 시크릿 검증
         run: |
+          # 시크릿 값은 출력하지 않고 선택된 환경과 설정 여부만 기록한다.
+          echo "::notice::AI EC2 배포 대상: branch=${GITHUB_REF_NAME}, environment=${DEPLOY_ENV}"
           [ -n "$AWS_ROLE_ARN" ] || { echo "::error::secrets.AWS_ROLE_ARN 이 비어 있습니다"; exit 1; }
           [ -n "$INSTANCE_ID" ]  || { echo "::error::secrets.AI_INSTANCE_ID 가 비어 있습니다"; exit 1; }
           [ -n "$DEPLOY_DIR" ]   || { echo "::error::secrets.AI_DEPLOY_DIR 이 비어 있습니다"; exit 1; }
+          echo "::notice::AI EC2 배포 시크릿: AWS_ROLE_ARN, AI_INSTANCE_ID, AI_DEPLOY_DIR 설정됨"
 
       - name: AWS 인증 (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
