@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import time
 
+import sentry_sdk
 import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
@@ -49,12 +50,11 @@ async def start_recording_session(websocket: WebSocket) -> None:
         )
         return
 
-    websocket.app.state.recording_connections += 1
-
     api_key = websocket.app.state.settings.speechmatics_api_key
     transcript_queue: TranscriptQueue = asyncio.Queue()
     sender_task: asyncio.Task[None] | None = None
     background_error: Exception | None = None
+    provider_error_reported = False
 
     def on_transcript(message: TranscriptMessage) -> None:
         transcript_queue.put_nowait(message)
@@ -65,6 +65,12 @@ async def start_recording_session(websocket: WebSocket) -> None:
             background_error = error
 
     def on_provider_error(error: Exception) -> None:
+        nonlocal provider_error_reported
+        if provider_error_reported:
+            return
+        provider_error_reported = True
+        sentry_sdk.metrics.count("meety.stt.errors", 1, attributes={"service": "live"})
+        sentry_sdk.capture_exception(error)
         # 백엔드에는 일반화한 메시지만 보내므로 원인 예외는 로그에만 남긴다.
         logger.error("stt_provider_failed", exc_info=error)
         on_error(STTProviderError("음성 전사 공급자 연결 또는 처리에 실패했습니다."))
@@ -97,6 +103,7 @@ async def start_recording_session(websocket: WebSocket) -> None:
     # 사유를 확인하지 못한 채 끝나면(예상하지 못한 예외 등) 오류로 기록한다.
     close_reason: str | None = None
     audio_bytes = 0
+    websocket.app.state.recording_connections += 1
     try:
         await websocket.accept()
         try:

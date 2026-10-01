@@ -3,6 +3,7 @@ import time
 from typing import TypedDict
 
 import modal
+import sentry_sdk
 import structlog
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import TypeAdapter, ValidationError, with_config
@@ -49,6 +50,7 @@ async def diarize(audio_url: str, timeout_seconds: float) -> list[SpeakerInterva
         # Modal 호출 소요 시간은 성공·실패 로그에 공통으로 남긴다.
         duration_ms = round((time.perf_counter() - started) * 1000)
     except (TimeoutError, modal.exception.TimeoutError) as exc:
+        sentry_sdk.capture_exception(exc)
         logger.warning(
             "diarization_timeout",
             error_type=type(exc).__name__,
@@ -58,6 +60,7 @@ async def diarize(audio_url: str, timeout_seconds: float) -> list[SpeakerInterva
             status_code=504, detail="화자 분리 응답 시간이 초과되었습니다."
         ) from None
     except modal.exception.Error as exc:
+        sentry_sdk.capture_exception(exc)
         logger.warning(
             "diarization_call_failed",
             error_type=type(exc).__name__,
@@ -69,6 +72,9 @@ async def diarize(audio_url: str, timeout_seconds: float) -> list[SpeakerInterva
         error_code = result.get("error_code")
         if error_code not in _MODAL_ERROR_STATUS:
             error_code = "unknown"
+        sentry_sdk.capture_exception(
+            RuntimeError("화자 분리 처리 실패"), tags={"error_code": error_code}
+        )
         logger.warning("diarization_failed", error_code=error_code, duration_ms=duration_ms)
         raise HTTPException(
             status_code=_MODAL_ERROR_STATUS.get(error_code, 502),
@@ -89,6 +95,7 @@ async def diarize(audio_url: str, timeout_seconds: float) -> list[SpeakerInterva
         )
         return intervals
     except (TypeError, KeyError, ValueError) as exc:
+        sentry_sdk.capture_exception(exc)
         logger.warning("diarization_invalid_response", error_type=type(exc).__name__)
         raise HTTPException(status_code=502, detail={"errorCode": "invalid_response"}) from None
 
