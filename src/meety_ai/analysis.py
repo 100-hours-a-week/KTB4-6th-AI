@@ -2,6 +2,7 @@
 
 import os
 
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from langchain_openai import ChatOpenAI
 
@@ -13,6 +14,8 @@ from meety_ai.summary.router import summary_router
 
 
 def create_analysis_app() -> FastAPI:
+    # LangSmith SDK는 환경 변수만 읽으므로 .env의 LANGSMITH_* 값을 환경 변수로 올린다.
+    load_dotenv()
     settings = AnalysisSettings()
     app = create_app("analysis", settings)
     # Modal SDK는 .env 파일이 아니라 환경 변수에서 토큰을 읽으므로 설정 값을 넘겨준다.
