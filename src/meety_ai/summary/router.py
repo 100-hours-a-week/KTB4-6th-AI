@@ -1,5 +1,6 @@
 import time
 
+import sentry_sdk
 import structlog
 from fastapi import APIRouter, HTTPException, Request, Response
 from openai import APIError, APITimeoutError
@@ -55,10 +56,12 @@ async def generate_summary(payload: SummaryRequest, request: Request) -> Respons
             provider_status=getattr(exc, "status_code", None),
         )
         if isinstance(exc, APITimeoutError):
+            sentry_sdk.capture_exception(exc)
             raise HTTPException(
                 status_code=504, detail="LLM API 공급자 응답 시간이 초과되었습니다."
             ) from exc
         if isinstance(exc, APIError):
+            sentry_sdk.capture_exception(exc)
             raise HTTPException(
                 status_code=502, detail="LLM API 공급자 호출에 실패했습니다."
             ) from exc

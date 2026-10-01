@@ -6,8 +6,10 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from uuid import uuid4
 
+import sentry_sdk
 import structlog
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
+from starlette.websockets import WebSocketDisconnect
 from structlog.contextvars import (
     bind_contextvars,
     bound_contextvars,
@@ -48,6 +50,11 @@ class LogContextMiddleware:
         self.service = service
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        with sentry_sdk.isolation_scope() as sentry_scope:
+            sentry_scope.set_client(getattr(scope.get("app").state, "sentry_client", None))
+            await self._handle(scope, receive, send)
+
+    async def _handle(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] not in {"http", "websocket"}:
             await self.app(scope, receive, send)
             return
@@ -79,16 +86,33 @@ class LogContextMiddleware:
 
         try:
             await self.app(scope, receive, send_with_request_id)
+        except Exception as error:
+            # 클라이언트 연결 종료는 운영 오류로 수집하지 않는다.
+            if not isinstance(error, WebSocketDisconnect):
+                sentry_sdk.capture_exception(error)
+            raise
         finally:
             # 헬스체크는 주기적으로 반복돼 로그 비용만 늘리므로 제외한다.
             # 쿼리 문자열에는 비밀값이 섞일 수 있어 path만 남긴다.
             if scope["type"] == "http" and scope["path"] != "/healthz":
+                duration_ms = (time.perf_counter() - started) * 1000
                 logger.info(
                     "http_request_completed",
                     method=scope["method"],
                     path=scope["path"],
                     status=status,
-                    duration_ms=round((time.perf_counter() - started) * 1000),
+                    duration_ms=round(duration_ms),
+                )
+                route = scope.get("route")
+                attributes = {
+                    "service": self.service,
+                    "route": getattr(route, "path", "unmatched"),
+                    "method": scope["method"],
+                    "status": status,
+                }
+                sentry_sdk.metrics.count("meety.http.requests", 1, attributes=attributes)
+                sentry_sdk.metrics.distribution(
+                    "meety.http.duration", duration_ms, unit="millisecond", attributes=attributes
                 )
             clear_contextvars()
             bind_contextvars(**previous)

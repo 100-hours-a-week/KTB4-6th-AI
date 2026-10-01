@@ -35,9 +35,11 @@ class SpeechmaticsClient:
         self._client.on(ServerMessageType.ERROR, self._handle_error)
         self._client.on(ServerMessageType.END_OF_TRANSCRIPT, self._handle_end)
 
-    def _report_error(self) -> STTProviderError:
+    def _report_error(self, cause: Exception | None = None) -> STTProviderError:
         if self._error is None:
             self._error = STTProviderError("음성 전사 공급자 연결 또는 처리에 실패했습니다.")
+            # 콜백에서 즉시 보고하므로 원본 예외를 알림 전에 연결한다.
+            self._error.__cause__ = cause
             if self._on_error is not None:
                 self._on_error(self._error)
         return self._error
@@ -71,7 +73,7 @@ class SpeechmaticsClient:
         except TimeoutError:
             raise
         except Exception as error:
-            raise self._report_error() from error
+            raise self._report_error(error) from error
 
         self._client._recv_task.add_done_callback(self._receive_done)
         if self._error is not None:
@@ -84,7 +86,7 @@ class SpeechmaticsClient:
         except TimeoutError:
             raise
         except Exception as error:
-            raise self._report_error() from error
+            raise self._report_error(error) from error
 
     async def finish(self) -> None:
         """입력 종료를 알리고 마지막 확정 전사까지 기다린다."""
@@ -94,7 +96,7 @@ class SpeechmaticsClient:
         except TimeoutError:
             raise
         except Exception as error:
-            raise self._report_error() from error
+            raise self._report_error(error) from error
         if self._error is not None or not self._end_received:
             raise self._report_error()
 

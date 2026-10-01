@@ -17,8 +17,9 @@ class Settings(BaseSettings):
         hide_input_in_errors=True,
     )
 
-    environment: Literal["local", "test", "production"] = "local"
+    environment: Literal["local", "test", "staging", "production"] = "local"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    sentry_dsn: SecretStr | None = None
 
     # 공급자 키는 MEETY_ 접두사를 쓰지 않으므로 환경변수 이름을 명시한다.
     # 값은 SecretStr이라 repr/str과 로그에 원문이 남지 않는다.
