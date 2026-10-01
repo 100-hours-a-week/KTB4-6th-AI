@@ -1,5 +1,6 @@
 import time
 
+import sentry_sdk
 import structlog
 from fastapi import APIRouter, HTTPException, Request, Response
 from openai import APIError, APITimeoutError
@@ -36,7 +37,14 @@ async def generate_summary(payload: SummaryRequest, request: Request) -> Respons
                 "transcript": transcript,
                 "previous_summary": payload.previous_summary,
                 "regeneration_reason": payload.regeneration_reason,
-            }
+            },
+            config={
+                "run_name": "meeting_summary",
+                "metadata": {
+                    "meeting_id": payload.meeting_id,
+                    "request_id": payload.request_id,
+                },
+            },
         )
     except Exception as exc:
         # 예외 메시지에 프롬프트·응답 일부가 섞일 수 있어 타입과 공급자 상태코드만 남긴다.
@@ -48,10 +56,12 @@ async def generate_summary(payload: SummaryRequest, request: Request) -> Respons
             provider_status=getattr(exc, "status_code", None),
         )
         if isinstance(exc, APITimeoutError):
+            sentry_sdk.capture_exception(exc)
             raise HTTPException(
                 status_code=504, detail="LLM API 공급자 응답 시간이 초과되었습니다."
             ) from exc
         if isinstance(exc, APIError):
+            sentry_sdk.capture_exception(exc)
             raise HTTPException(
                 status_code=502, detail="LLM API 공급자 호출에 실패했습니다."
             ) from exc

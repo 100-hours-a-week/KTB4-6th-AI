@@ -11,13 +11,15 @@ class Settings(BaseSettings):
         env_prefix="MEETY_",
         env_file=".env",
         env_file_encoding="utf-8",
-        extra="forbid",
-        # 미정의 .env 항목이 거부될 때 오류 메시지에 값 원문이 찍히지 않게 한다.
+        # LangSmith 등 SDK가 직접 읽는 환경변수는 앱 설정에서 무시한다.
+        extra="ignore",
+        # 설정 검증 오류에 비밀값 원문이 찍히지 않게 한다.
         hide_input_in_errors=True,
     )
 
-    environment: Literal["local", "test", "production"] = "local"
+    environment: Literal["local", "test", "staging", "production"] = "local"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    sentry_dsn: SecretStr | None = None
 
     # 공급자 키는 MEETY_ 접두사를 쓰지 않으므로 환경변수 이름을 명시한다.
     # 값은 SecretStr이라 repr/str과 로그에 원문이 남지 않는다.
