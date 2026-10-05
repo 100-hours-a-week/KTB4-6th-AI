@@ -24,7 +24,9 @@ class SpeechmaticsClient:
         api_key: str,
         on_transcript: Callable[[dict[str, Any]], None],
         on_error: Callable[[STTProviderError], None] | None = None,
+        additional_vocab: list[dict[str, Any]] | None = None,
     ) -> None:
+        self._additional_vocab = additional_vocab
         self._on_error = on_error
         self._error: STTProviderError | None = None
         self._closing = False
@@ -64,6 +66,7 @@ class SpeechmaticsClient:
                     language="ko",
                     model=Model.ENHANCED,
                     diarization="speaker",
+                    additional_vocab=self._additional_vocab,
                 ),
                 audio_format=AudioFormat(
                     encoding=AudioEncoding.PCM_S16LE,

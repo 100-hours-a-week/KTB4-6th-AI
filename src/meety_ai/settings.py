@@ -1,6 +1,6 @@
 """프로세스 설정. 공급자 API 키는 `.env`의 기존 이름(접두사 없음)을 그대로 읽는다."""
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     environment: Literal["local", "test", "staging", "production"] = "local"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     sentry_dsn: SecretStr | None = None
+    stt_additional_vocab: list[dict[str, Any]] = Field(default_factory=list)
 
     # 공급자 키는 MEETY_ 접두사를 쓰지 않으므로 환경변수 이름을 명시한다.
     # 값은 SecretStr이라 repr/str과 로그에 원문이 남지 않는다.

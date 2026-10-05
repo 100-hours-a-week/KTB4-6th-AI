@@ -92,11 +92,14 @@ async def start_recording_session(websocket: WebSocket) -> None:
 
     # 부하테스트 진입점은 app.state에 가짜 클라이언트를 넣는다.
     stt_client_factory = getattr(websocket.app.state, "stt_client_factory", SpeechmaticsClient)
-    stt_client = stt_client_factory(
-        api_key=api_key.get_secret_value(),
-        on_transcript=on_transcript,
-        on_error=on_provider_error,
-    )
+    stt_client_kwargs = {
+        "api_key": api_key.get_secret_value(),
+        "on_transcript": on_transcript,
+        "on_error": on_provider_error,
+    }
+    if websocket.app.state.settings.stt_additional_vocab:
+        stt_client_kwargs["additional_vocab"] = websocket.app.state.settings.stt_additional_vocab
+    stt_client = stt_client_factory(**stt_client_kwargs)
 
     session = RecordingSession(stt_client.send_audio)
     started = time.perf_counter()
