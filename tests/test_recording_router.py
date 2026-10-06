@@ -6,6 +6,7 @@ from threading import Event
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
+from starlette.testclient import WebSocketDenialResponse
 from starlette.websockets import WebSocketDisconnect
 
 import meety_ai.recording.router as router_module
@@ -36,6 +37,36 @@ WEBM_HEAD = b"\x1a\x45\xdf\xa3"
 
 meta_message = {"type": "audio.meta", "payload": {"sequence": 0}}
 stop_message = {"type": "session.stop", "requestId": "stop-01"}
+
+
+def test_recording_connection_limit_from_environment(monkeypatch, fake_speechmatics_client):
+    monkeypatch.setenv("MEETY_MAX_RECORDING_CONNECTIONS", "1")
+    app = create_live_app()
+
+    with TestClient(app) as client:
+        with client.websocket_connect(WEBSOCKET_URL) as ws:
+            ws.send_json(start_message)
+            assert ws.receive_json()["type"] == "session.ready"
+
+            with pytest.raises(WebSocketDenialResponse) as error:
+                with client.websocket_connect(WEBSOCKET_URL):
+                    pytest.fail("상한을 초과한 연결이 허용됐습니다.")
+
+            assert error.value.status_code == 429
+            assert error.value.json() == {"error": "capacity_exceeded"}
+            assert app.state.recording_connections == 1
+            assert len(fake_speechmatics_client) == 1
+
+        assert app.state.recording_connections == 0
+        assert fake_speechmatics_client[0].closed
+
+        with client.websocket_connect(WEBSOCKET_URL) as ws:
+            ws.send_json(start_message)
+            assert ws.receive_json()["type"] == "session.ready"
+            assert app.state.recording_connections == 1
+
+        assert app.state.recording_connections == 0
+        assert fake_speechmatics_client[1].closed
 
 
 def test_missing_provider_key_prevents_live_app_start(monkeypatch, tmp_path):
