@@ -26,7 +26,7 @@ class QnAMessage(Message):
 
 class TranscriptionSegment(Message):
     segment_id: Annotated[int, Field(gt=0)]
-    speaker_display_name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+    speaker_display_name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)] | None
     sequence_number: Annotated[int, Field(ge=0)]
     content: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
     started_at_ms: Annotated[int, Field(ge=0)]
