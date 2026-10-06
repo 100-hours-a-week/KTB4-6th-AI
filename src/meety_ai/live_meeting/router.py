@@ -1,4 +1,4 @@
-"""Backend 전용 WebSocket의 수신·응답·연결 종료를 처리한다."""
+"""실시간 회의의 Backend 전용 WebSocket 수신·응답·연결 종료를 처리한다."""
 
 import asyncio
 import contextlib
@@ -27,13 +27,13 @@ from meety_ai.recording.transcript import TranscriptMessage, TranscriptQueue, se
 
 logger = structlog.stdlib.get_logger(__name__)
 
-recording_router = APIRouter()
+live_meeting_router = APIRouter()
 MAX_TEXT_SIZE = 4 * 1024
 BINARY_WAIT_TIMEOUT = 10
 STT_STOP_TIMEOUT = 30
 
 
-@recording_router.websocket("/v1/live-meeting")
+@live_meeting_router.websocket("/v1/live-meeting")
 async def start_recording_session(websocket: WebSocket) -> None:
     if (
         websocket.app.state.recording_connections

@@ -2,7 +2,7 @@ import subprocess
 
 import pytest
 
-import meety_ai.recording.router as router_module
+import meety_ai.live_meeting.router as router_module
 import meety_ai.recording.session as session_module
 
 

@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from starlette.testclient import WebSocketDenialResponse
 from starlette.websockets import WebSocketDisconnect
 
-import meety_ai.recording.router as router_module
+import meety_ai.live_meeting.router as router_module
 from meety_ai.live import create_live_app
 
 WEBSOCKET_URL = "/v1/live-meeting"
