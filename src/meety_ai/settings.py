@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import AnyHttpUrl, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -45,6 +45,9 @@ class LiveSettings(Settings):
 
     max_recording_connections: int = Field(default=20, gt=0)
     speechmatics_api_key: SecretStr = Field(validation_alias="SPEECHMATICS_API_KEY")
+    backend_base_url: AnyHttpUrl | None = None
+    chat_model: str = "openai/gpt-6-luna"
+    chat_timeout_seconds: float = Field(default=120.0, gt=0)
 
 
 class AnalysisSettings(Settings):
