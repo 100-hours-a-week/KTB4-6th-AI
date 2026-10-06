@@ -1,40 +1,29 @@
 """Speechmatics 결과를 문장 단위 Backend 메시지로 조립한다."""
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import WebSocket
+from pydantic import BaseModel
 
+from meety_ai.live_meeting.transport import send_message as send_message
 from meety_ai.recording.schemas import (
-    Message,
-    SessionError,
     TranscriptCommitted,
     TranscriptCommittedPayload,
 )
 
 MAX_TRANSCRIPT_DURATION_SECONDS = 10
-MESSAGE_SEND_TIMEOUT = 10
 SENTENCE_ENDINGS = (".", "?", "!")
 TranscriptMessage = dict[str, Any]
 TranscriptQueue = asyncio.Queue[TranscriptMessage | None]
 
 
-async def send_message(websocket: WebSocket, message: Message) -> None:
-    """Backend 전송이 일정 시간 이상 멈추면 세션을 중단한다."""
-    async with asyncio.timeout(MESSAGE_SEND_TIMEOUT):
-        await websocket.send_json(
-            message.model_dump(
-                mode="json", by_alias=True, exclude_none=isinstance(message, SessionError)
-            )
-        )
-
-
 async def send_transcripts(
-    websocket: WebSocket,
     queue: TranscriptQueue,
     meeting_id: str,
     recording_session_id: str,
+    send_event: Callable[[BaseModel], Awaitable[None]],
 ) -> None:
     """확정 단어를 문장·화자·최대 길이 기준으로 묶어 전송한다."""
     sequence_number = 0
@@ -60,7 +49,7 @@ async def send_transcripts(
                 recognized_at=datetime.now(UTC),
             ),
         )
-        await send_message(websocket, transcript)
+        await send_event(transcript)
         sequence_number += 1
         buffered_text = ""
         started_at = None

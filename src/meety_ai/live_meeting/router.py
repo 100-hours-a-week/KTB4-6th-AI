@@ -1,7 +1,7 @@
 """실시간 회의의 Backend 전용 WebSocket 수신·응답·연결 종료를 처리한다."""
 
 import asyncio
-import contextlib
+import json
 import time
 
 import sentry_sdk
@@ -9,21 +9,22 @@ import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
-from structlog.contextvars import bind_contextvars
 
+from meety_ai.chat.agent import generate_answer
+from meety_ai.chat.session import ChatSession
+from meety_ai.live_meeting.transport import receive_message, send_message
 from meety_ai.recording.decoder import AudioDecodeError
+from meety_ai.recording.live import LiveRecording
 from meety_ai.recording.schemas import (
-    DecoderReset,
     SessionEnded,
     SessionError,
     SessionErrorPayload,
-    SessionStart,
     SessionStop,
     client_event_adapter,
 )
-from meety_ai.recording.session import RecordingSession, SessionProtocolError
+from meety_ai.recording.session import SessionProtocolError
 from meety_ai.recording.stt_client import SpeechmaticsClient, STTProviderError
-from meety_ai.recording.transcript import TranscriptMessage, TranscriptQueue, send_transcripts
+from meety_ai.recording.transcript import send_transcripts
 
 logger = structlog.stdlib.get_logger(__name__)
 
@@ -52,55 +53,42 @@ async def start_recording_session(websocket: WebSocket) -> None:
         )
         return
 
-    api_key = websocket.app.state.settings.speechmatics_api_key
-    transcript_queue: TranscriptQueue = asyncio.Queue()
-    sender_task: asyncio.Task[None] | None = None
-    background_error: Exception | None = None
-    provider_error_reported = False
+    settings = websocket.app.state.settings
+    failure: asyncio.Future[Exception] = asyncio.get_running_loop().create_future()
+    send_lock = asyncio.Lock()
 
-    def on_transcript(message: TranscriptMessage) -> None:
-        transcript_queue.put_nowait(message)
+    async def send_event(message) -> None:
+        await send_message(websocket, message, send_lock)
 
     def on_error(error: Exception) -> None:
-        nonlocal background_error
-        if background_error is None:
-            background_error = error
+        if not failure.done():
+            failure.set_result(error)
 
     def on_provider_error(error: Exception) -> None:
-        nonlocal provider_error_reported
-        if provider_error_reported:
-            return
-        provider_error_reported = True
         sentry_sdk.metrics.count("meety.stt.errors", 1, attributes={"service": "live"})
         sentry_sdk.capture_exception(error)
         # 백엔드에는 일반화한 메시지만 보내므로 원인 예외는 로그에만 남긴다.
         logger.error("stt_provider_failed", exc_info=error)
-        on_error(STTProviderError("음성 전사 공급자 연결 또는 처리에 실패했습니다."))
 
-    def raise_background_error() -> None:
-        if background_error is not None:
-            raise background_error
-
-    async def forward_transcripts(event: SessionStart) -> None:
-        try:
-            await send_transcripts(
-                websocket,
-                transcript_queue,
-                event.meeting_id,
-                event.recording_session_id,
-            )
-        except Exception as error:
-            on_error(error)
-
-    # 부하테스트 진입점은 app.state에 가짜 클라이언트를 넣는다.
-    stt_client_factory = getattr(websocket.app.state, "stt_client_factory", SpeechmaticsClient)
-    stt_client = stt_client_factory(
-        api_key=api_key.get_secret_value(),
-        on_transcript=on_transcript,
-        on_error=on_provider_error,
+    # 실제 공급자와 부하테스트용 Adapter가 같은 Interface를 사용한다.
+    provider_factory = getattr(websocket.app.state, "stt_client_factory", SpeechmaticsClient)
+    recording = LiveRecording(
+        settings.speechmatics_api_key.get_secret_value(),
+        send_event,
+        on_error,
+        on_provider_error,
+        provider_factory=provider_factory,
+        transcript_sender=send_transcripts,
+        stop_timeout=STT_STOP_TIMEOUT,
     )
-
-    session = RecordingSession(stt_client.send_audio)
+    chat = ChatSession(
+        websocket.app.state.chat_model,
+        str(settings.backend_base_url) if settings.backend_base_url else None,
+        send_event,
+        on_error,
+        timeout_seconds=settings.chat_timeout_seconds,
+        answer_generator=generate_answer,
+    )
     started = time.perf_counter()
     # 사유를 확인하지 못한 채 끝나면(예상하지 못한 예외 등) 오류로 기록한다.
     close_reason: str | None = None
@@ -111,13 +99,8 @@ async def start_recording_session(websocket: WebSocket) -> None:
         try:
             while True:
                 request_id = None
-                raise_background_error()
-
-                timeout = BINARY_WAIT_TIMEOUT if session.expects_binary else None
-                async with asyncio.timeout(timeout):
-                    data = await websocket.receive()
-
-                raise_background_error()
+                timeout = BINARY_WAIT_TIMEOUT if recording.expects_binary else None
+                data = await receive_message(websocket, failure, timeout)
 
                 if data["type"] == "websocket.disconnect":
                     close_reason = "client_disconnect"
@@ -125,41 +108,33 @@ async def start_recording_session(websocket: WebSocket) -> None:
 
                 response = None
                 if data.get("text") is not None:
-                    if len(data["text"].encode("utf-8")) > MAX_TEXT_SIZE:
+                    text_size = len(data["text"].encode("utf-8"))
+                    if text_size > 2 * 1024 * 1024:
+                        raise SessionProtocolError("message_too_large", "메시지가 너무 큽니다.")
+                    try:
+                        raw = json.loads(data["text"])
+                    except ValueError as error:
+                        raise SessionProtocolError(
+                            "invalid_message", "메시지 형식이 올바르지 않습니다."
+                        ) from error
+                    if isinstance(raw, dict) and raw.get("type") == "chat.request":
+                        await chat.submit(raw, text_size, recording.chat_meeting_id)
+                        continue
+                    if text_size > MAX_TEXT_SIZE:
                         raise SessionProtocolError("message_too_large", "메시지가 너무 큽니다.")
 
                     event = client_event_adapter.validate_json(data["text"])
                     request_id = getattr(event, "request_id", None)
-                    response = await session.handle_event(event)
-
-                    if isinstance(event, SessionStart):
-                        # 이후 이 연결에서 남기는 로그에 회의 식별자를 함께 기록한다.
-                        bind_contextvars(
-                            meeting_id=event.meeting_id,
-                            recording_session_id=event.recording_session_id,
-                        )
-                        logger.info("session_started")
-                        await stt_client.start()
-                        # @debt
-                        sender_task = asyncio.create_task(forward_transcripts(event))
-
-                    if isinstance(event, DecoderReset):
-                        logger.info("decoder_reset", audio_format=event.payload.audio_format)
-
                     if isinstance(event, SessionStop):
-                        async with asyncio.timeout(STT_STOP_TIMEOUT):
-                            await stt_client.finish()
-                            raise_background_error()
-                            await transcript_queue.put(None)
-                            await sender_task
-                            raise_background_error()
+                        await chat.close()
+                    response = await recording.handle_event(event)
 
                 elif data.get("bytes") is not None:
                     audio_bytes += len(data["bytes"])
-                    await session.handle_binary(data["bytes"])
+                    await recording.handle_binary(data["bytes"])
 
                 if response is not None:
-                    await websocket.send_json(response.model_dump(by_alias=True))
+                    await send_event(response)
 
                 if isinstance(response, SessionEnded):
                     logger.info(
@@ -214,7 +189,8 @@ async def start_recording_session(websocket: WebSocket) -> None:
                 request_id=request_id,
                 payload=SessionErrorPayload(code=code, message=message, retryable=retryable),
             )
-            await websocket.send_json(response.model_dump(by_alias=True, exclude_none=True))
+            await chat.close()
+            await send_event(response)
             await websocket.close(code=close_code)
 
     except WebSocketDisconnect:
@@ -229,15 +205,9 @@ async def start_recording_session(websocket: WebSocket) -> None:
             audio_bytes=audio_bytes,
         )
         try:
-            if sender_task is not None:
-                sender_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await sender_task
+            await chat.close()
         finally:
             try:
-                await stt_client.close()
+                await recording.close()
             finally:
-                try:
-                    await session.close()
-                finally:
-                    websocket.app.state.recording_connections -= 1
+                websocket.app.state.recording_connections -= 1

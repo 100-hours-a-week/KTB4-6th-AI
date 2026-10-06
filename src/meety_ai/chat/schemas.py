@@ -1,7 +1,6 @@
-from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from pydantic.alias_generators import to_camel
 
 
@@ -26,7 +25,9 @@ class QnAMessage(Message):
 
 class TranscriptionSegment(Message):
     segment_id: Annotated[int, Field(gt=0)]
-    speaker_display_name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)] | None
+    speaker_display_name: (
+        Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)] | None
+    )
     sequence_number: Annotated[int, Field(ge=0)]
     content: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
     started_at_ms: Annotated[int, Field(ge=0)]
