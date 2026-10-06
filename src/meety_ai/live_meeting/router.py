@@ -8,22 +8,19 @@ import sentry_sdk
 import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
-from pydantic import ValidationError
 
 from meety_ai.chat.agent import generate_answer
 from meety_ai.chat.session import ChatSession
-from meety_ai.live_meeting.transport import receive_message, send_message
-from meety_ai.recording.decoder import AudioDecodeError
+from meety_ai.live_meeting.errors import MEETING_ERRORS, build_error_response
+from meety_ai.live_meeting.transport import MeetingReceiver, send_message
 from meety_ai.recording.live import LiveRecording
 from meety_ai.recording.schemas import (
     SessionEnded,
-    SessionError,
-    SessionErrorPayload,
     SessionStop,
     client_event_adapter,
 )
 from meety_ai.recording.session import SessionProtocolError
-from meety_ai.recording.stt_client import SpeechmaticsClient, STTProviderError
+from meety_ai.recording.stt_client import SpeechmaticsClient
 from meety_ai.recording.transcript import send_transcripts
 
 logger = structlog.stdlib.get_logger(__name__)
@@ -54,15 +51,11 @@ async def start_recording_session(websocket: WebSocket) -> None:
         return
 
     settings = websocket.app.state.settings
-    failure: asyncio.Future[Exception] = asyncio.get_running_loop().create_future()
+    receiver = MeetingReceiver(websocket)
     send_lock = asyncio.Lock()
 
     async def send_event(message) -> None:
         await send_message(websocket, message, send_lock)
-
-    def on_error(error: Exception) -> None:
-        if not failure.done():
-            failure.set_result(error)
 
     def on_provider_error(error: Exception) -> None:
         sentry_sdk.metrics.count("meety.stt.errors", 1, attributes={"service": "live"})
@@ -75,7 +68,7 @@ async def start_recording_session(websocket: WebSocket) -> None:
     recording = LiveRecording(
         settings.speechmatics_api_key.get_secret_value(),
         send_event,
-        on_error,
+        receiver.report_error,
         on_provider_error,
         provider_factory=provider_factory,
         transcript_sender=send_transcripts,
@@ -85,7 +78,7 @@ async def start_recording_session(websocket: WebSocket) -> None:
         websocket.app.state.chat_model,
         str(settings.backend_base_url) if settings.backend_base_url else None,
         send_event,
-        on_error,
+        receiver.report_error,
         timeout_seconds=settings.chat_timeout_seconds,
         answer_generator=generate_answer,
     )
@@ -100,7 +93,7 @@ async def start_recording_session(websocket: WebSocket) -> None:
             while True:
                 request_id = None
                 timeout = BINARY_WAIT_TIMEOUT if recording.expects_binary else None
-                data = await receive_message(websocket, failure, timeout)
+                data = await receiver.receive(timeout)
 
                 if data["type"] == "websocket.disconnect":
                     close_reason = "client_disconnect"
@@ -146,49 +139,9 @@ async def start_recording_session(websocket: WebSocket) -> None:
                     close_reason = "normal"
                     break
 
-        except (
-            ValidationError,
-            SessionProtocolError,
-            AudioDecodeError,
-            TimeoutError,
-            STTProviderError,
-        ) as error:
-            retryable = False
-            if isinstance(error, STTProviderError):
-                code, message = "provider_unavailable", str(error)
-                retryable = True
-                request_id = None
-            elif isinstance(error, ValidationError):
-                code, message = "invalid_message", "메시지 형식이 올바르지 않습니다."
-            elif isinstance(error, SessionProtocolError):
-                code, message = error.code, str(error)
-            elif isinstance(error, AudioDecodeError):
-                code, message = "audio_decode_failed", "오디오 처리에 실패했습니다."
-            else:
-                code, message = "processing_timeout", "처리 대기 시간이 초과됐습니다."
-
-            close_code = 1008
-            if code == "message_too_large":
-                close_code = 1009
-            elif code in ("audio_decode_failed", "processing_timeout", "provider_unavailable"):
-                close_code = 1011
-
+        except MEETING_ERRORS as error:
             close_reason = "error"
-            log = logger.error if code == "provider_unavailable" else logger.warning
-            # ValidationError 등의 메시지에는 입력 원문이 섞일 수 있어 예외 타입만 남긴다.
-            log(
-                "session_failed",
-                code=code,
-                close_code=close_code,
-                request_id=request_id,
-                error_type=type(error).__name__,
-            )
-
-            response = SessionError(
-                type="error",
-                request_id=request_id,
-                payload=SessionErrorPayload(code=code, message=message, retryable=retryable),
-            )
+            response, close_code = build_error_response(error, request_id)
             await chat.close()
             await send_event(response)
             await websocket.close(code=close_code)

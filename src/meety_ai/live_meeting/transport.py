@@ -24,18 +24,28 @@ async def send_message(
             )
 
 
-async def receive_message(
-    websocket: WebSocket, failure: asyncio.Future[Exception], timeout: float | None
-) -> dict:
-    """입력 또는 background 오류를 기다리고 수신 작업이 남지 않도록 정리한다."""
-    receiver = asyncio.create_task(websocket.receive())
-    try:
-        async with asyncio.timeout(timeout):
-            await asyncio.wait((receiver, failure), return_when=asyncio.FIRST_COMPLETED)
-        if failure.done():
-            raise failure.result()
-        return receiver.result()
-    finally:
-        receiver.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await receiver
+class MeetingReceiver:
+    """첫 background 오류로 입력 대기를 깨우고 수신 작업을 정리한다."""
+
+    def __init__(self, websocket: WebSocket) -> None:
+        self._websocket = websocket
+        self._failure: asyncio.Future[Exception] = asyncio.get_running_loop().create_future()
+
+    def report_error(self, error: Exception) -> None:
+        """여러 작업이 실패해도 첫 오류만 전달한다."""
+        if not self._failure.done():
+            self._failure.set_result(error)
+
+    async def receive(self, timeout: float | None = None) -> dict:
+        """입력 또는 오류를 기다린다. 반환·실패·취소 시 수신 작업이 남지 않는다."""
+        receiver = asyncio.create_task(self._websocket.receive())
+        try:
+            async with asyncio.timeout(timeout):
+                await asyncio.wait((receiver, self._failure), return_when=asyncio.FIRST_COMPLETED)
+            if self._failure.done():
+                raise self._failure.result()
+            return receiver.result()
+        finally:
+            receiver.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await receiver
