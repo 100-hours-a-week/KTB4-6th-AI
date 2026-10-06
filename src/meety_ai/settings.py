@@ -43,6 +43,7 @@ class Settings(BaseSettings):
 class LiveSettings(Settings):
     """실시간 서비스에 필요한 설정."""
 
+    max_recording_connections: int = Field(default=20, gt=0)
     speechmatics_api_key: SecretStr = Field(validation_alias="SPEECHMATICS_API_KEY")
 
 

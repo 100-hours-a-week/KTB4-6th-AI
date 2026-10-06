@@ -14,6 +14,13 @@ from meety_ai.live import create_live_app
 WEBSOCKET_URL = "/v1/live-meeting"
 CHUNK_SIZE = 16 * 1024
 
+# 테스트 이름: test_recording_connection_limit_from_environment
+# 목적: 환경변수로 지정한 상한까지 연결을 허용하고 초과 연결만 거절한다.
+# 준비: monkeypatch.setenv로 MEETY_MAX_RECORDING_CONNECTIONS를 1로 설정하고 앱을 만든다.
+# 실행: TestClient에서 첫 WebSocket을 유지한 채 두 번째 연결을 시도하고, 첫 연결 종료 후 재연결한다.
+# 기대 결과: 두 번째 연결은 HTTP 429와 capacity_exceeded를 받고, 종료 후 재연결은 허용된다.
+# 실패 조건: 설정한 상한이 무시되거나 거절·종료 후 연결 수가 복구되지 않으면 실패한다.
+
 start_message = {
     "type": "session.start",
     "requestId": "start-01",
