@@ -1,7 +1,6 @@
 """실시간 회의의 Backend 전용 WebSocket 수신·응답·연결 종료를 처리한다."""
 
 import asyncio
-import json
 import time
 
 import sentry_sdk
@@ -10,23 +9,22 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
 from meety_ai.chat.agent import generate_answer
+from meety_ai.chat.schemas import ChatFailed, ChatRequest
 from meety_ai.chat.session import ChatSession
 from meety_ai.live_meeting.errors import MEETING_ERRORS, build_error_response
+from meety_ai.live_meeting.messages import parse_meeting_message
 from meety_ai.live_meeting.transport import MeetingReceiver, send_message
 from meety_ai.recording.live import LiveRecording
 from meety_ai.recording.schemas import (
     SessionEnded,
     SessionStop,
-    client_event_adapter,
 )
-from meety_ai.recording.session import SessionProtocolError
 from meety_ai.recording.stt_client import SpeechmaticsClient
 from meety_ai.recording.transcript import send_transcripts
 
 logger = structlog.stdlib.get_logger(__name__)
 
 live_meeting_router = APIRouter()
-MAX_TEXT_SIZE = 4 * 1024
 BINARY_WAIT_TIMEOUT = 10
 STT_STOP_TIMEOUT = 30
 
@@ -101,22 +99,13 @@ async def start_recording_session(websocket: WebSocket) -> None:
 
                 response = None
                 if data.get("text") is not None:
-                    text_size = len(data["text"].encode("utf-8"))
-                    if text_size > 2 * 1024 * 1024:
-                        raise SessionProtocolError("message_too_large", "메시지가 너무 큽니다.")
-                    try:
-                        raw = json.loads(data["text"])
-                    except ValueError as error:
-                        raise SessionProtocolError(
-                            "invalid_message", "메시지 형식이 올바르지 않습니다."
-                        ) from error
-                    if isinstance(raw, dict) and raw.get("type") == "chat.request":
-                        await chat.submit(raw, text_size, recording.chat_meeting_id)
+                    event = parse_meeting_message(data["text"])
+                    if isinstance(event, ChatFailed):
+                        await send_event(event)
                         continue
-                    if text_size > MAX_TEXT_SIZE:
-                        raise SessionProtocolError("message_too_large", "메시지가 너무 큽니다.")
-
-                    event = client_event_adapter.validate_json(data["text"])
+                    if isinstance(event, ChatRequest):
+                        await chat.submit(event, recording.chat_meeting_id)
+                        continue
                     request_id = getattr(event, "request_id", None)
                     if isinstance(event, SessionStop):
                         await chat.close()
