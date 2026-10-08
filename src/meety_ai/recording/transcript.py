@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import WebSocket
 
+from meety_ai.core.schema import MeetingId, RecordingSessionId
 from meety_ai.recording.schemas import (
     Message,
     SessionError,
@@ -33,8 +34,8 @@ async def send_message(websocket: WebSocket, message: Message) -> None:
 async def send_transcripts(
     websocket: WebSocket,
     queue: TranscriptQueue,
-    meeting_id: str,
-    recording_session_id: str,
+    meeting_id: MeetingId,
+    recording_session_id: RecordingSessionId,
 ) -> None:
     """확정 단어를 문장·화자·최대 길이 기준으로 묶어 전송한다."""
     sequence_number = 0

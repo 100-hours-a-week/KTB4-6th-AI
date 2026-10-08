@@ -18,8 +18,8 @@ CHUNK_SIZE = 16 * 1024
 start_message = {
     "type": "session.start",
     "requestId": "start-01",
-    "meetingId": "meeting-01",
-    "recordingSessionId": "recording-01",
+    "meetingId": 1,
+    "recordingSessionId": 1,
 }
 
 reset_message = {
@@ -79,12 +79,6 @@ def test_missing_provider_key_prevents_live_app_start(monkeypatch, tmp_path):
     assert error.value.errors(include_input=False)[0]["loc"] == ("SPEECHMATICS_API_KEY",)
 
 
-# 1. test_recording_flow
-# 목적: JSON·binary 수신부터 정상 응답·종료까지 실제 배선을 검증한다.
-# 실행: start → ready → meta(0) → binary → stop → ended.
-# 기대: ready의 요청 ID와 오디오 규격이 맞고 디코더에 원본 binary가 전달된다.
-# 기대: ended의 lastSequence·audioDurationMs가 출력 PCM에 맞고 camelCase로 전송된다.
-# 기대: close 1000 이후 디코더가 정리된다.
 def test_recording_flow(fake_decoders):
     with TestClient(create_live_app()) as client:
         with client.websocket_connect(WEBSOCKET_URL) as ws:
@@ -93,8 +87,8 @@ def test_recording_flow(fake_decoders):
             assert ready == {
                 "type": "session.ready",
                 "requestId": "start-01",
-                "meetingId": "meeting-01",
-                "recordingSessionId": "recording-01",
+                "meetingId": 1,
+                "recordingSessionId": 1,
                 "payload": {
                     "status": "READY",
                     "outputAudioFormat": "pcm_s16le",
@@ -112,8 +106,8 @@ def test_recording_flow(fake_decoders):
             assert ended == {
                 "type": "session.ended",
                 "requestId": "stop-01",
-                "meetingId": "meeting-01",
-                "recordingSessionId": "recording-01",
+                "meetingId": 1,
+                "recordingSessionId": 1,
                 "payload": {
                     "status": "ENDED",
                     "lastSequence": 0,
@@ -231,16 +225,16 @@ def test_connections_are_isolated_on_disconnect(fake_decoders):
                     {
                         "type": "session.start",
                         "requestId": "start-01",
-                        "meetingId": "meeting-01",
-                        "recordingSessionId": "recording-01",
+                        "meetingId": 1,
+                        "recordingSessionId": 1,
                     }
                 )
                 ready_a = ws_a.receive_json()
                 assert ready_a == {
                     "type": "session.ready",
                     "requestId": "start-01",
-                    "meetingId": "meeting-01",
-                    "recordingSessionId": "recording-01",
+                    "meetingId": 1,
+                    "recordingSessionId": 1,
                     "payload": {
                         "status": "READY",
                         "outputAudioFormat": "pcm_s16le",
@@ -253,16 +247,16 @@ def test_connections_are_isolated_on_disconnect(fake_decoders):
                     {
                         "type": "session.start",
                         "requestId": "start-02",
-                        "meetingId": "meeting-02",
-                        "recordingSessionId": "recording-02",
+                        "meetingId": 2,
+                        "recordingSessionId": 2,
                     }
                 )
                 ready_b = ws_b.receive_json()
                 assert ready_b == {
                     "type": "session.ready",
                     "requestId": "start-02",
-                    "meetingId": "meeting-02",
-                    "recordingSessionId": "recording-02",
+                    "meetingId": 2,
+                    "recordingSessionId": 2,
                     "payload": {
                         "status": "READY",
                         "outputAudioFormat": "pcm_s16le",
@@ -306,8 +300,8 @@ def test_connections_are_isolated_on_disconnect(fake_decoders):
             assert ended_b == {
                 "type": "session.ended",
                 "requestId": "stop-01",
-                "meetingId": "meeting-02",
-                "recordingSessionId": "recording-02",
+                "meetingId": 2,
+                "recordingSessionId": 2,
                 "payload": {
                     "status": "ENDED",
                     "lastSequence": 2,
@@ -446,8 +440,8 @@ def test_committed_transcript_arrives_before_stop(fake_decoders, fake_speechmati
 
             response = ws.receive_json()
             assert response["type"] == "transcript.committed"
-            assert response["meetingId"] == "meeting-01"
-            assert response["recordingSessionId"] == "recording-01"
+            assert response["meetingId"] == 1
+            assert response["recordingSessionId"] == 1
 
             payload = response["payload"]
             assert payload["sequenceNumber"] == 0

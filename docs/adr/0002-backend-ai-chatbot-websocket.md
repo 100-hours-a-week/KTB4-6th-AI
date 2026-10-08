@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded by [ADR-0010](0010-backend-ai-chatbot-http-200.md)
 
 ---
 ## Context

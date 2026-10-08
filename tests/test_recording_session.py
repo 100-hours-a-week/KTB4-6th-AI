@@ -44,13 +44,13 @@ async def test_recording_lifecycle(fake_decoders):
             SessionStart(
                 type="session.start",
                 request_id="start-01",
-                meeting_id="meeting-01",
-                recording_session_id="record-01",
+                meeting_id=1,
+                recording_session_id=1,
             )
         )
         assert ready.request_id == "start-01"
-        assert ready.meeting_id == "meeting-01"
-        assert ready.recording_session_id == "record-01"
+        assert ready.meeting_id == 1
+        assert ready.recording_session_id == 1
         assert ready.payload.output_audio_format == "pcm_s16le"
         assert ready.payload.output_sample_rate_hz == 16000
         assert ready.payload.output_channels == 1
@@ -135,8 +135,8 @@ async def test_invalid_state_transition(fake_decoders):
             SessionStart(
                 type="session.start",
                 request_id="start-01",
-                meeting_id="meet-01",
-                recording_session_id="record-01",
+                meeting_id=1,
+                recording_session_id=1,
             )
         )
         paused = await session_2.handle_event(
@@ -159,8 +159,8 @@ async def test_invalid_state_transition(fake_decoders):
             SessionStart(
                 type="session.start",
                 request_id="start-01",
-                meeting_id="meet-01",
-                recording_session_id="record-01",
+                meeting_id=1,
+                recording_session_id=1,
             )
         )
         paused = await session_3.handle_event(

@@ -3,25 +3,9 @@
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter
-from pydantic.alias_generators import to_camel
+from pydantic import Field, TypeAdapter
 
-
-class Message(BaseModel):
-    model_config = ConfigDict(
-        alias_generator=to_camel, validate_by_name=True, extra="forbid", strict=True
-    )
-
-
-Identifier = Annotated[
-    str,
-    StringConstraints(
-        min_length=1,
-        max_length=128,
-        pattern=r"^[A-Za-z0-9._-]+$",
-    ),
-]
-
+from meety_ai.core.schema import Identifier, MeetingId, Message, NonNegativeInt, RecordingSessionId
 
 AudioFormat = Literal["webm_opus", "mp4_aac"]
 
@@ -29,8 +13,9 @@ AudioFormat = Literal["webm_opus", "mp4_aac"]
 class SessionStart(Message):
     type: Literal["session.start"]
     request_id: Identifier
-    meeting_id: Identifier
-    recording_session_id: Identifier
+    # ponytail: BE 문자열 ID 송신이 변경되면 strict=False를 제거한다(AI #77).
+    meeting_id: MeetingId = Field(strict=False)
+    recording_session_id: RecordingSessionId = Field(strict=False)
 
 
 class SessionReadyPayload(Message):
@@ -43,8 +28,8 @@ class SessionReadyPayload(Message):
 class SessionReady(Message):
     type: Literal["session.ready"]
     request_id: Identifier
-    meeting_id: Identifier
-    recording_session_id: Identifier
+    meeting_id: MeetingId
+    recording_session_id: RecordingSessionId
     payload: SessionReadyPayload
 
 
@@ -70,22 +55,22 @@ class DecoderReady(Message):
 
 
 class TranscriptCommittedPayload(Message):
-    sequence_number: Annotated[int, Field(ge=0)]
+    sequence_number: NonNegativeInt
     content: str
-    started_at_ms: Annotated[int, Field(ge=0)]
-    ended_at_ms: Annotated[int, Field(ge=0)]
+    started_at_ms: NonNegativeInt
+    ended_at_ms: NonNegativeInt
     recognized_at: datetime
 
 
 class TranscriptCommitted(Message):
     type: Literal["transcript.committed"]
-    meeting_id: Identifier
-    recording_session_id: Identifier
+    meeting_id: MeetingId
+    recording_session_id: RecordingSessionId
     payload: TranscriptCommittedPayload
 
 
 class AudioMetaPayload(Message):
-    sequence: Annotated[int, Field(ge=0)]
+    sequence: NonNegativeInt
 
 
 class AudioMeta(Message):
@@ -130,15 +115,15 @@ class SessionStop(Message):
 
 class SessionEndedPayload(Message):
     status: Literal["ENDED"]
-    last_sequence: Annotated[int, Field(ge=0)] | None
-    audio_duration_ms: Annotated[int, Field(ge=0)]
+    last_sequence: NonNegativeInt | None
+    audio_duration_ms: NonNegativeInt
 
 
 class SessionEnded(Message):
     type: Literal["session.ended"]
     request_id: Identifier
-    meeting_id: Identifier
-    recording_session_id: Identifier
+    meeting_id: MeetingId
+    recording_session_id: RecordingSessionId
     payload: SessionEndedPayload
 
 

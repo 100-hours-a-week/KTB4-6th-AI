@@ -1,45 +1,30 @@
 from datetime import datetime
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
-from pydantic.alias_generators import to_camel
+from pydantic import Field, StringConstraints
 
-
-class Message(BaseModel):
-    model_config = ConfigDict(
-        alias_generator=to_camel, validate_by_name=True, extra="forbid", strict=True
-    )
-
-
-Identifier = Annotated[
-    str,
-    StringConstraints(
-        min_length=1,
-        max_length=128,
-        pattern=r"^[A-Za-z0-9._-]+$",
-    ),
-]
+from meety_ai.core.schema import Identifier, MeetingId, Message, NonNegativeInt
 
 
 class Speaker(Message):
-    speaker_id: int
-    team_member_id: int | None
+    speaker_id: NonNegativeInt
+    team_member_id: NonNegativeInt | None
     display_name: str | None
 
 
 class TranscriptionSegment(Message):
-    segment_id: int
+    segment_id: NonNegativeInt
     # 화자 분리에서 대표 화자를 판단할 수 없던 구간은 null이다.
-    speaker_id: int | None
-    sequence_number: Annotated[int, Field(ge=0)]
+    speaker_id: NonNegativeInt | None
+    sequence_number: NonNegativeInt
     content: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
-    started_at_ms: int
-    ended_at_ms: int
+    started_at_ms: NonNegativeInt
+    ended_at_ms: NonNegativeInt
 
 
 class SummaryRequest(Message):
     request_id: Identifier
-    meeting_id: int
+    meeting_id: MeetingId
     title: str
     purpose: str
     note: str
