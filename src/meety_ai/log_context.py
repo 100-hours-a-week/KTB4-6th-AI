@@ -17,6 +17,8 @@ from structlog.contextvars import (
     get_contextvars,
 )
 
+from meety_ai.core.schema import MeetingId
+
 logger = structlog.stdlib.get_logger(__name__)
 
 _REQUEST_ID_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,128}")
@@ -33,7 +35,7 @@ def _http_request_id(scope: Scope) -> str:
 
 
 @contextmanager
-def bind_request_context(request_id: str, *, meeting_id: str | None = None) -> Iterator[None]:
+def bind_request_context(request_id: str, *, meeting_id: MeetingId | None = None) -> Iterator[None]:
     """검증된 작업 메시지의 요청 ID를 연결하고 완료·실패 시 이전 문맥을 복원한다."""
     if not _REQUEST_ID_PATTERN.fullmatch(request_id):
         raise ValueError("request_id는 영문·숫자·점·밑줄·하이픈으로 된 1~128자여야 합니다.")

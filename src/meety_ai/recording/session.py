@@ -6,6 +6,7 @@ from enum import StrEnum
 
 import structlog
 
+from meety_ai.core.schema import MeetingId, RecordingSessionId
 from meety_ai.recording.decoder import AudioDecodeError, AudioDecoder
 from meety_ai.recording.schemas import (
     AudioMeta,
@@ -61,8 +62,8 @@ class SessionProtocolError(Exception):
 class RecordingSession:
     def __init__(self, on_pcm: Callable[[bytes], Awaitable[None]]):
         self._state = SessionState.NEW
-        self._meeting_id: str | None = None
-        self._recording_session_id: str | None = None
+        self._meeting_id: MeetingId | None = None
+        self._recording_session_id: RecordingSessionId | None = None
         self._audio_format: str | None = None
 
         self._last_sequence: int | None = None
