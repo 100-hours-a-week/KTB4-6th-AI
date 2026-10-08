@@ -14,7 +14,7 @@ Accepted
 
 [클라우드 V2 서비스 확장 가정](https://github.com/100-hours-a-week/KTB4-6th-wiki/wiki/1.-서비스-확장-MAU-및-RPS-가정)은 V2 도입 후 3년의 목표 MAU를 250,000명, DAU를 100,000명으로 두고, 챗봇 목표·최악 피크를 각각 2.55·3.82 RPS로 산정한다. 전체 서비스 피크는 각각 44.26·88.78 RPS이며, 기존 단일 인스턴스 구성에서 인스턴스 다중화·로드밸런싱·이벤트 버스 도입 등을 검토해야 한다고 제시한다. 이는 실제 트래픽이나 처리 용량 측정이 아닌 성장 시나리오다. 이 ADR에서는 해당 시나리오에 대비해 QnA가 특정 녹음 연결과 인스턴스에 묶이지 않고 분산 환경으로 확장될 수 있어야 한다는 설계 기준으로 사용한다.
 
-이 ADR의 범위는 QnA의 Backend–AI 전송 경로와 결과 전달 책임이다. 전사 WebSocket, Agent의 자료 조회 방식, 서비스의 실행·배포 경계는 유지한다. 채택 시 ADR-0002를 대체하며, [ADR-0004](0004-ai-service-deployment-boundaries.md)의 회의 중 기능이 WebSocket을 공유한다는 설명도 QnA에 대해서는 변경된다.
+이 ADR의 범위는 QnA의 Backend–AI 전송 경로와 결과 전달 책임이다. 전사 WebSocket, Agent의 자료 조회 방식, 서비스의 실행·배포 경계는 유지한다. ADR-0002를 대체하며, [ADR-0004](0004-ai-service-deployment-boundaries.md)의 회의 중 기능이 WebSocket을 공유한다는 설명도 QnA에 대해서는 변경된다.
 
 ---
 
