@@ -47,24 +47,28 @@ async def generate_summary(payload: SummaryRequest, request: Request) -> Respons
             },
         )
     except Exception as exc:
-        # 예외 메시지에 프롬프트·응답 일부가 섞일 수 있어 타입과 공급자 상태코드만 남긴다.
+        # 예외 원문에는 입력이 섞일 수 있어 응답용 메시지와 공급자 코드만 추가한다.
+        if isinstance(exc, APITimeoutError):
+            error_message = "LLM API 공급자 응답 시간이 초과되었습니다."
+        elif isinstance(exc, APIError):
+            error_message = "LLM API 공급자 호출에 실패했습니다."
+        else:
+            error_message = "회의 요약 생성에 실패했습니다."
         logger.warning(
             "summary_failed",
             model=model,
             duration_ms=round((time.perf_counter() - started) * 1000),
             error_type=type(exc).__name__,
+            error_message=error_message,
+            provider_code=exc.code if isinstance(exc, APIError) else None,
             provider_status=getattr(exc, "status_code", None),
         )
         if isinstance(exc, APITimeoutError):
             sentry_sdk.capture_exception(exc)
-            raise HTTPException(
-                status_code=504, detail="LLM API 공급자 응답 시간이 초과되었습니다."
-            ) from exc
+            raise HTTPException(status_code=504, detail=error_message) from exc
         if isinstance(exc, APIError):
             sentry_sdk.capture_exception(exc)
-            raise HTTPException(
-                status_code=502, detail="LLM API 공급자 호출에 실패했습니다."
-            ) from exc
+            raise HTTPException(status_code=502, detail=error_message) from exc
         raise
     logger.info(
         "summary_completed",

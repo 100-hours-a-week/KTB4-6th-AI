@@ -45,6 +45,8 @@ async def answer_question(payload: ChatRequest, request: Request) -> ChatRespons
         logger.warning(
             "chat_failed",
             code=error.code,
+            error_message=str(error),
+            error_type=type(error.__cause__ or error).__name__,
             duration_ms=round((time.perf_counter() - started) * 1000),
         )
         return JSONResponse(
