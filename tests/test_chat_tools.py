@@ -75,3 +75,22 @@ async def test_retrieval_tools_preserve_qna_prefix(tool_index, arguments, expect
                     "status": "COMPLETED",
                     "content": "요약",
                 }
+
+
+@pytest.mark.parametrize("tool_index", [1, 2])
+async def test_current_meeting_lookup_guides_agent_without_backend_request(tool_index):
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        data = {"segments": []} if request.url.path.endswith("/transcripts") else {"summary": None}
+        return httpx.Response(200, json={"success": True, "data": data, "error": None})
+
+    async with httpx.AsyncClient(
+        base_url="https://backend.test", transport=httpx.MockTransport(handle)
+    ) as client:
+        tools = create_qna_tools(client, team_id=3, ai_request_id=88, current_meeting_id=42)
+        result = await tools[tool_index].ainvoke({"meeting_id": 42})
+
+    assert result == "현재 회의는 조회하지 말고 요청에 제공된 전사를 사용하세요."
+    assert requests == []
