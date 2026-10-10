@@ -3,7 +3,7 @@ from typing import Annotated
 
 from pydantic import Field, StringConstraints
 
-from meety_ai.core.schema import Identifier, MeetingId, Message, NonNegativeInt
+from meety_ai.core.schemas import Identifier, MeetingId, Message, NonNegativeInt
 
 
 class Speaker(Message):
