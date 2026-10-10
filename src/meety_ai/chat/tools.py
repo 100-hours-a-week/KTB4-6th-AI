@@ -100,7 +100,9 @@ def create_qna_tools(
         meeting_id: MeetingId,
         keyword: Annotated[str, StringConstraints(min_length=2, max_length=20)] | None = None,
     ) -> dict:
-        """지정한 회의의 전사를 조회한다. 키워드가 있으면 관련 구간만 조회한다."""
+        """과거 회의의 전사를 조회한다. 현재 회의는 요청에 제공된 전사를 사용한다."""
+        if meeting_id == current_meeting_id:
+            raise ToolException("현재 회의는 조회하지 말고 요청에 제공된 전사를 사용하세요.")
         data = await get_data(f"/meetings/{meeting_id}/transcripts", {"keyword": keyword})
         try:
             result = TranscriptResponse.model_validate(data)
@@ -110,7 +112,9 @@ def create_qna_tools(
 
     @tool
     async def get_meeting_summary(meeting_id: MeetingId) -> dict:
-        """회의 최신 요약을 조회한다. 사용 가능한 요약이 없으면 전사를 조회한다."""
+        """과거 회의의 최신 요약을 조회한다. 요약이 없으면 해당 회의의 전사를 조회한다."""
+        if meeting_id == current_meeting_id:
+            raise ToolException("현재 회의는 조회하지 말고 요청에 제공된 전사를 사용하세요.")
         data = await get_data(f"/meetings/{meeting_id}/summaries", {})
         try:
             result = InternalSummaryResponse.model_validate(data).summary
