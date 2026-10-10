@@ -4,7 +4,7 @@
 
 Accepted — 2026-09-09
 
-QnA의 Backend–AI 통신은 [ADR-0010](0010-backend-ai-chatbot-http-200.md)에 따라 기존 WebSocket 공유에서 HTTP 요청·응답으로 변경한다. 이 ADR의 실시간·회의 분석·GPU 추론 실행 및 배포 경계는 유지한다.
+QnA는 [ADR-0010](0010-backend-ai-chatbot-http-200.md)에 따라 회의 분석 AI의 HTTP API로 제공한다. QnA의 통신 방식과 배포 위치는 ADR-0010을 따르며, 나머지 실행·배포 경계는 유지한다.
 
 ---
 
