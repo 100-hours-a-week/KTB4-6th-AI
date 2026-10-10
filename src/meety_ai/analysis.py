@@ -1,12 +1,16 @@
-"""Analysis service entry point; feature routes will be added later."""
+"""분석 앱을 조립하고 챗봇·요약·화자 분리 HTTP 요청을 처리한다."""
 
 import os
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 
+import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from langchain_openai import ChatOpenAI
 
 from meety_ai.app import create_app
+from meety_ai.chat.router import chat_router
 from meety_ai.diarization.router import diarization_router
 from meety_ai.settings import AnalysisSettings
 from meety_ai.summary.chain import create_summary_chain
@@ -18,6 +22,29 @@ def create_analysis_app() -> FastAPI:
     load_dotenv()
     settings = AnalysisSettings()
     app = create_app("analysis", settings)
+    common_lifespan = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+        async with common_lifespan(app):
+            app.state.chat_model = ChatOpenAI(
+                model=settings.chat_model,
+                api_key=settings.openrouter_api_key,
+                base_url="https://openrouter.ai/api/v1",
+                timeout=settings.chat_timeout_seconds,
+                max_retries=3,
+            )
+            async with httpx.AsyncClient(
+                base_url=settings.backend_base_url,
+                headers={"X-Internal-Api-Key": settings.internal_api_key.get_secret_value()}
+                if settings.internal_api_key
+                else {},
+                timeout=10,
+            ) as backend_client:
+                app.state.backend_client = backend_client
+                yield
+
+    app.router.lifespan_context = lifespan
     # Modal SDK는 .env 파일이 아니라 환경 변수에서 토큰을 읽으므로 설정 값을 넘겨준다.
     os.environ["MODAL_TOKEN_ID"] = settings.modal_token_id
     os.environ["MODAL_TOKEN_SECRET"] = settings.modal_token_secret.get_secret_value()
@@ -29,6 +56,7 @@ def create_analysis_app() -> FastAPI:
         max_retries=0,
     )
     app.state.summary_chain = create_summary_chain(model)
+    app.include_router(chat_router)
     app.include_router(summary_router)
     app.include_router(diarization_router)
     return app

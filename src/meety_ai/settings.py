@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     modal_token_secret: SecretStr | None = Field(
         default=None, validation_alias="MODAL_TOKEN_SECRET"
     )
+    backend_base_url: str = "http://localhost:8080"
+    internal_api_key: SecretStr | None = Field(default=None, validation_alias="INTERNAL_API_KEY")
+    chat_model: str = "openai/gpt-6-luna"
+    chat_timeout_seconds: float = Field(default=60.0, gt=0)
+
     summary_model: str = "openai/gpt-6-luna"
     summary_timeout_seconds: float = Field(default=120.0, gt=0)
     # Modal 함수 자체 제한(3600초)과 맞춘 SDK 호출 대기 시간이다.
