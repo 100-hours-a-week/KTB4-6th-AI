@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import WebSocket
 
-from meety_ai.core.schema import MeetingId, RecordingSessionId
+from meety_ai.core.schemas import MeetingId, RecordingSessionId
 from meety_ai.recording.schemas import (
     Message,
     SessionError,

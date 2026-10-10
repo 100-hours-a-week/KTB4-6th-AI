@@ -2,7 +2,7 @@ from typing import Annotated
 
 from pydantic import Field, StringConstraints, model_validator
 
-from meety_ai.core.schema import Identifier, MeetingId, Message, NonNegativeInt
+from meety_ai.core.schemas import Identifier, MeetingId, Message, NonNegativeInt
 
 
 class DiarizationSegment(Message):

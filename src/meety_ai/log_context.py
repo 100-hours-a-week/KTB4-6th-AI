@@ -17,7 +17,7 @@ from structlog.contextvars import (
     get_contextvars,
 )
 
-from meety_ai.core.schema import MeetingId
+from meety_ai.core.schemas import MeetingId
 
 logger = structlog.stdlib.get_logger(__name__)
 

@@ -5,7 +5,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, TypeAdapter
 
-from meety_ai.core.schema import Identifier, MeetingId, Message, NonNegativeInt, RecordingSessionId
+from meety_ai.core.schemas import Identifier, MeetingId, Message, NonNegativeInt, RecordingSessionId
 
 AudioFormat = Literal["webm_opus", "mp4_aac"]
 
