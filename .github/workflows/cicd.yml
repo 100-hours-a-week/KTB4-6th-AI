@@ -80,6 +80,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       image_tag: ${{ steps.vars.outputs.sha }}
+      # V2 배포는 태그 대신 바뀌지 않는 digest로 이미지를 고정한다.
+      image_digest: ${{ steps.push.outputs.digest }}
     steps:
       - name: 소스 코드 체크아웃
         uses: actions/checkout@v4
@@ -216,3 +218,89 @@ jobs:
         if: failure()
         run: |
           curl -H "Content-Type: application/json" -X POST -d "{\"content\": \"❌ [배포 실패] ${{ github.repository }}\nBranch: ${{ github.ref_name }} (${{ github.sha }})\nAuthor: ${{ github.actor }}\nFailed Job: deploy\nImage Tag: ${{ env.IMAGE_TAG }}\nError Message: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" "${{ secrets.DISCORD_WEBHOOK_URL }}"
+
+  deploy-v2-staging:
+    name: AI V2 staging 무중단 배포
+    # Modal 화자 분리 함수는 V1 dev(staging Environment)에 배포된 것을 같이 쓴다.
+    needs: [docker-build, deploy-modal]
+    # V1 dev 배포와 별개로 실행한다. 저장소 변수로 켜고 끈다.
+    if: ${{ github.ref_name == 'dev' && vars.V2_STAGING_DEPLOY_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: v2-staging
+    permissions:
+      id-token: write
+      contents: read
+    concurrency:
+      group: deploy-ai-v2-staging
+      cancel-in-progress: false
+    env:
+      AWS_REGION: ap-northeast-2
+      INSTANCE_ID: ${{ secrets.AI_INSTANCE_ID }}
+      IMAGE: ${{ vars.DOCKERHUB_USERNAME }}/meety-ai@${{ needs.docker-build.outputs.image_digest }}
+      # mock: 가짜 공급자 앱(비용 없음), real: 실제 공급자 호출. Environment 변수로 바꾼 뒤 이 job을 다시 실행한다.
+      MODE: ${{ vars.AI_PROVIDER_MODE || 'mock' }}
+      BACKEND_BASE_URL: https://api-staging.meety.io.kr
+    steps:
+      - name: 배포 설정 확인
+        env:
+          AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+        run: |
+          echo "::notice::AI V2 staging 배포 대상: mode=${MODE}, image=${IMAGE}"
+          [ -n "$AWS_ROLE_ARN" ] || { echo "::error::AWS_ROLE_ARN 누락"; exit 1; }
+          [ -n "$INSTANCE_ID" ] || { echo "::error::AI_INSTANCE_ID 누락"; exit 1; }
+          case "$MODE" in mock|real) ;; *) echo "::error::AI_PROVIDER_MODE는 mock 또는 real (현재: $MODE)"; exit 1 ;; esac
+
+      - name: 소스 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: AWS 인증
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-ai-v2-deploy-${{ github.run_id }}
+          role-skip-session-tagging: true
+
+      # 배포 스크립트 앞에 이번 배포 값을 붙여 AI 인스턴스에서 실행한다. 공급자 키는 인스턴스가 직접 읽는다.
+      - name: 무중단 배포 실행
+        run: |
+          {
+            echo '#!/bin/bash'
+            printf 'IMAGE=%q\nMODE=%q\nREGION=%q\nBACKEND_BASE_URL=%q\n' "$IMAGE" "$MODE" "$AWS_REGION" "$BACKEND_BASE_URL"
+            tail -n +2 .github/scripts/deploy-v2-staging.sh
+          } > remote.sh
+
+          COMMAND_ID=$(aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript \
+            --comment "deploy v2 ai ${MODE} (run ${GITHUB_RUN_ID})" --timeout-seconds 60 \
+            --parameters "$(jq -Rs '{commands: split("\n"), executionTimeout: ["900"]}' remote.sh)" \
+            --query Command.CommandId --output text)
+
+          STATUS=Pending
+          for i in $(seq 1 180); do
+            STATUS=$(aws ssm get-command-invocation --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" \
+              --query Status --output text 2>/dev/null || echo Pending)
+            case "$STATUS" in Pending|InProgress|Delayed) sleep 5 ;; *) break ;; esac
+          done
+          echo "::group::서버 stdout"
+          aws ssm get-command-invocation --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" \
+            --query StandardOutputContent --output text || true
+          echo "::endgroup::"
+          echo "::group::서버 stderr"
+          aws ssm get-command-invocation --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" \
+            --query StandardErrorContent --output text || true
+          echo "::endgroup::"
+          [ "$STATUS" = "Success" ] || { echo "::error::AI 배포 실패 (status=$STATUS). 기존 슬롯은 계속 서비스한다"; exit 1; }
+
+      - name: Discord 알림 (V2 배포 실패)
+        if: failure()
+        env:
+          WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          [ -n "$WEBHOOK_URL" ] || exit 0
+          jq -n --arg repo "$GITHUB_REPOSITORY" --arg branch "$GITHUB_REF_NAME" --arg url "$RUN_URL" \
+            '{content: ("❌ [AI V2 staging 배포 실패] " + $repo + "\nBranch: " + $branch + "\n" + $url)}' \
+            | curl --fail --silent --show-error -H "Content-Type: application/json" --data-binary @- "$WEBHOOK_URL"
+
