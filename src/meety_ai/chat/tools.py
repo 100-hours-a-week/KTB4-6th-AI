@@ -98,12 +98,12 @@ def create_qna_tools(
     @tool
     async def get_meeting_transcript(
         meeting_id: MeetingId,
-        keyword: Annotated[str, StringConstraints(min_length=2, max_length=20)] | None = None,
+        #keyword: Annotated[str, StringConstraints(min_length=2, max_length=20)] | None = None,
     ) -> dict:
         """과거 회의의 전사를 조회한다. 현재 회의는 요청에 제공된 전사를 사용한다."""
         if meeting_id == current_meeting_id:
             raise ToolException("현재 회의는 조회하지 말고 요청에 제공된 전사를 사용하세요.")
-        data = await get_data(f"/meetings/{meeting_id}/transcripts", {"keyword": keyword})
+        data = await get_data(f"/meetings/{meeting_id}/transcripts", {"keyword": None})
         try:
             result = TranscriptResponse.model_validate(data)
         except ValidationError as error:
