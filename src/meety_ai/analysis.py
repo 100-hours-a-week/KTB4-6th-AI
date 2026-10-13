@@ -12,6 +12,8 @@ from langchain_openai import ChatOpenAI
 from meety_ai.app import create_app
 from meety_ai.chat.router import chat_router
 from meety_ai.diarization.router import diarization_router
+from meety_ai.metric.chain import create_metric_chain
+from meety_ai.metric.router import metric_router
 from meety_ai.settings import AnalysisSettings
 from meety_ai.summary.chain import create_summary_chain
 from meety_ai.summary.router import summary_router
@@ -56,7 +58,9 @@ def create_analysis_app() -> FastAPI:
         max_retries=0,
     )
     app.state.summary_chain = create_summary_chain(model)
+    app.state.metric_chain = create_metric_chain(model)
     app.include_router(chat_router)
     app.include_router(summary_router)
     app.include_router(diarization_router)
+    app.include_router(metric_router)
     return app
