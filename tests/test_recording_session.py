@@ -46,6 +46,8 @@ async def test_recording_lifecycle(fake_decoders):
                 request_id="start-01",
                 meeting_id=1,
                 recording_session_id=1,
+                participant_count=0,
+                participants=[],
             )
         )
         assert ready.request_id == "start-01"
@@ -137,6 +139,8 @@ async def test_invalid_state_transition(fake_decoders):
                 request_id="start-01",
                 meeting_id=1,
                 recording_session_id=1,
+                participant_count=0,
+                participants=[],
             )
         )
         paused = await session_2.handle_event(
@@ -161,6 +165,8 @@ async def test_invalid_state_transition(fake_decoders):
                 request_id="start-01",
                 meeting_id=1,
                 recording_session_id=1,
+                participant_count=0,
+                participants=[],
             )
         )
         paused = await session_3.handle_event(
