@@ -10,12 +10,19 @@ from meety_ai.core.schemas import Identifier, MeetingId, Message, NonNegativeInt
 AudioFormat = Literal["webm_opus", "mp4_aac"]
 
 
+class SessionParticipant(Message):
+    team_member_id: NonNegativeInt | None
+    name: str
+
+
 class SessionStart(Message):
     type: Literal["session.start"]
     request_id: Identifier
     # ponytail: BE 문자열 ID 송신이 변경되면 strict=False를 제거한다(AI #77).
     meeting_id: MeetingId = Field(strict=False)
     recording_session_id: RecordingSessionId = Field(strict=False)
+    participant_count: NonNegativeInt
+    participants: list[SessionParticipant]
 
 
 class SessionReadyPayload(Message):

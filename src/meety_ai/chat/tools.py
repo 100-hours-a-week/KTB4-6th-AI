@@ -1,8 +1,8 @@
-from typing import Annotated, Literal
+from typing import Literal
 
 import httpx
 from langchain_core.tools import BaseTool, ToolException, tool
-from pydantic import StringConstraints, ValidationError
+from pydantic import ValidationError
 
 from meety_ai.chat.schemas import (
     BackendResponse,
@@ -98,7 +98,7 @@ def create_qna_tools(
     @tool
     async def get_meeting_transcript(
         meeting_id: MeetingId,
-        #keyword: Annotated[str, StringConstraints(min_length=2, max_length=20)] | None = None,
+        # keyword: Annotated[str, StringConstraints(min_length=2, max_length=20)] | None = None,
     ) -> dict:
         """과거 회의의 전사를 조회한다. 현재 회의는 요청에 제공된 전사를 사용한다."""
         if meeting_id == current_meeting_id:

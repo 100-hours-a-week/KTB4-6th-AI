@@ -20,6 +20,8 @@ start_message = {
     "requestId": "start-01",
     "meetingId": 1,
     "recordingSessionId": 1,
+    "participantCount": 0,
+    "participants": [],
 }
 
 reset_message = {
@@ -227,6 +229,8 @@ def test_connections_are_isolated_on_disconnect(fake_decoders):
                         "requestId": "start-01",
                         "meetingId": 1,
                         "recordingSessionId": 1,
+                        "participantCount": 0,
+                        "participants": [],
                     }
                 )
                 ready_a = ws_a.receive_json()
@@ -249,6 +253,8 @@ def test_connections_are_isolated_on_disconnect(fake_decoders):
                         "requestId": "start-02",
                         "meetingId": 2,
                         "recordingSessionId": 2,
+                        "participantCount": 0,
+                        "participants": [],
                     }
                 )
                 ready_b = ws_b.receive_json()

@@ -15,7 +15,13 @@ def test_valid_session_start():
         "type": "session.start",
         "requestId": "req-1",
         "meetingId": 42,
-        "recordingSessionId": 88
+        "recordingSessionId": 88,
+        "participantCount": 3,
+        "participants": [
+            {"teamMemberId": 10, "name": "김지우"},
+            {"teamMemberId": 11, "name": "박서준"},
+            {"teamMemberId": null, "name": "외부 디자이너"}
+        ]
     }"""
 
     event = client_event_adapter.validate_json(raw)
@@ -24,6 +30,13 @@ def test_valid_session_start():
     assert event.request_id == "req-1"
     assert event.meeting_id == 42
     assert event.recording_session_id == 88
+    assert event.participant_count == 3
+    assert [participant.team_member_id for participant in event.participants] == [10, 11, None]
+    assert [participant.name for participant in event.participants] == [
+        "김지우",
+        "박서준",
+        "외부 디자이너",
+    ]
 
 
 # 지원하지 않는 녹음 형식의 스트림 시작 요청이 시스템 안으로 들어오는 것을 막는다.
@@ -70,6 +83,12 @@ def test_recording_accepts_backend_numeric_string_ids_and_returns_integer_ids(
         "requestId": "start-01",
         "meetingId": "42",
         "recordingSessionId": "88",
+        "participantCount": 3,
+        "participants": [
+            {"teamMemberId": 10, "name": "김지우"},
+            {"teamMemberId": 11, "name": "박서준"},
+            {"teamMemberId": None, "name": "외부 디자이너"},
+        ],
     }
 
     reset_message = {
