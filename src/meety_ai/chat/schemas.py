@@ -1,6 +1,6 @@
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, StringConstraints, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from meety_ai.core.schemas import MeetingId, Message, NonNegativeInt
 
@@ -47,7 +47,7 @@ class Citation(Message):
 
 class ChatAnswer(Message):
     answer: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
-    citations: list[Citation]
+    citations: list[Citation] = Field(max_length=3)
 
 
 class ChatResponse(ChatAnswer):
