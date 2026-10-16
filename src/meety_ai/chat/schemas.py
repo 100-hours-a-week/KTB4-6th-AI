@@ -69,6 +69,7 @@ class MeetingListItem(Message):
     ended_at: str | None
     target_duration_minutes: int | None
     status: Literal["WAITING", "IN_PROGRESS", "COMPLETED"]
+    created_by_team_member_id: int
 
 
 class MeetingGroup(Message):
