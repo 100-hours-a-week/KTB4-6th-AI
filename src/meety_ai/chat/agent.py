@@ -24,6 +24,11 @@ SYSTEM_PROMPT = """
 최종 답변에는 Markdown answer와 citations를 포함하세요.
 citations에는 실제 제공된 자료의 sourceType(transcript/summary)과 meetingId를 넣으세요.
 전사 근거에는 segmentId, 요약 근거에는 summaryId를 넣으세요.
+답변의 핵심 주장(결정사항·일정·담당자 등)을 직접 뒷받침하는 대표 근거 1~2개만 우선 선택하세요.
+여러 회의를 비교할 때도 질문에 필요한 핵심 근거를 골라 citations는 최대 3개만 반환하세요.
+같은 사실을 반복하는 인접 발언·배경 발언은 제외하고, 의미가 같은 자료는 대표 근거만 선택하세요.
+동일한 (sourceType, meetingId, segmentId 또는 summaryId)는 한 번만 인용하세요.
+개수를 채우기 위해 근거를 추가하지 마세요.
 근거가 없으면 citations는 빈 배열입니다.""".strip()
 
 
@@ -106,14 +111,21 @@ def _create_middleware(
 
 
 def validate_citations(answer: ChatAnswer, sources: set) -> None:
+    seen = set()
+    citations = []
     for citation in answer.citations:
         source_id = (
             citation.segment_id if citation.source_type == "transcript" else citation.summary_id
         )
-        if (citation.source_type, citation.meeting_id, source_id) not in sources:
+        source = (citation.source_type, citation.meeting_id, source_id)
+        if source not in sources:
             raise ChatGenerationError(
                 "generation_failed", "답변 근거가 조회 자료와 일치하지 않습니다."
             )
+        if source not in seen:
+            seen.add(source)
+            citations.append(citation)
+    answer.citations = citations
 
 
 async def generate_answer(
