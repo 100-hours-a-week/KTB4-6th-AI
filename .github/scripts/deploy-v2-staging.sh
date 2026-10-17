@@ -4,10 +4,11 @@
 # 구조: nginx가 BE의 고정 포트(8000 live, 8001 analysis)를 받고, 뒤의 컨테이너 묶음(슬롯) 하나로 보낸다.
 #   blue  슬롯: live 127.0.0.1:8010, analysis 127.0.0.1:8011
 #   green 슬롯: live 127.0.0.1:8020, analysis 127.0.0.1:8021
+# 인스턴스마다 ROLES에 적힌 컨테이너만 띄우고, nginx도 그 포트만 받는다 (live 인스턴스와 analysis 인스턴스를 나눠 실행).
 # 순서: 비어 있는 슬롯에 새 버전 실행 → health 확인 → nginx 전환(reload) → 이전 슬롯은 연결이 끝나면 정리
 # nginx reload는 기존 연결(진행 중인 녹음 WebSocket, 분석 요청)을 이전 worker가 끝까지 처리한다.
 #
-# workflow가 앞에 붙여 주는 값: IMAGE, MODE(mock|real), REGION, BACKEND_BASE_URL
+# workflow가 앞에 붙여 주는 값: IMAGE, MODE(mock|real), REGION, BACKEND_BASE_URL, ROLES("live", "analysis", "live analysis")
 set -euo pipefail
 
 BASE=/opt/meety
@@ -17,6 +18,9 @@ NGINX_CONF=/etc/nginx/conf.d/meety-ai.conf
 PARAM_PREFIX=/meety/staging
 
 case "$MODE" in mock|real) ;; *) echo "AI_PROVIDER_MODE는 mock 또는 real이어야 한다: $MODE"; exit 1 ;; esac
+case "$ROLES" in live|analysis|"live analysis") ;; *) echo "ROLES는 live, analysis, \"live analysis\" 중 하나여야 한다: $ROLES"; exit 1 ;; esac
+
+has_role() { [[ " $ROLES " == *" $1 "* ]]; }
 
 slot_ports() { # 슬롯 이름 → "live포트 analysis포트"
   case "$1" in blue) echo "8010 8011" ;; green) echo "8020 8021" ;; esac
@@ -74,7 +78,7 @@ mv "$ENV_FILE.new" "$ENV_FILE"
 ACTIVE=$(cat "$ACTIVE_FILE" 2>/dev/null || true)
 if [ "$ACTIVE" = blue ]; then NEW=green; else NEW=blue; fi
 read -r LIVE_PORT ANALYSIS_PORT <<< "$(slot_ports "$NEW")"
-echo "모드: $MODE, 사용 중인 슬롯: ${ACTIVE:-없음}, 새 슬롯: $NEW"
+echo "모드: $MODE, 실행할 컨테이너: $ROLES, 사용 중인 슬롯: ${ACTIVE:-없음}, 새 슬롯: $NEW"
 
 # 새 슬롯 자리에 남아 있는 예전 컨테이너(두 번 전 배포)와 정리 예약을 지운다
 systemctl stop "meety-ai-cleanup-$NEW" 2> /dev/null || true
@@ -88,14 +92,26 @@ run_container() { # 이름 호스트포트 컨테이너포트 앱
     --log-driver json-file --log-opt max-size=10m --log-opt max-file=3 \
     "$IMAGE" uvicorn "$4" --factory --host 0.0.0.0 --port "$3" > /dev/null
 }
-run_container "ai-live-$NEW" "$LIVE_PORT" 8000 "$LIVE_APP"
-run_container "ai-analysis-$NEW" "$ANALYSIS_PORT" 8001 "$ANALYSIS_APP"
+HEALTH_PORTS=()
+if has_role live; then
+  run_container "ai-live-$NEW" "$LIVE_PORT" 8000 "$LIVE_APP"
+  HEALTH_PORTS+=("$LIVE_PORT")
+fi
+if has_role analysis; then
+  run_container "ai-analysis-$NEW" "$ANALYSIS_PORT" 8001 "$ANALYSIS_APP"
+  HEALTH_PORTS+=("$ANALYSIS_PORT")
+fi
 
 # 5. 새 슬롯 health 확인. 실패하면 새 슬롯만 지우고 끝낸다. 기존 슬롯은 계속 서비스한다
+slot_healthy() {
+  local port
+  for port in "${HEALTH_PORTS[@]}"; do
+    curl -fsS -o /dev/null "http://127.0.0.1:$port/healthz" || return 1
+  done
+}
 healthy=false
 for i in $(seq 1 60); do
-  if curl -fsS -o /dev/null "http://127.0.0.1:$LIVE_PORT/healthz" \
-    && curl -fsS -o /dev/null "http://127.0.0.1:$ANALYSIS_PORT/healthz"; then
+  if slot_healthy; then
     healthy=true
     break
   fi
@@ -105,7 +121,7 @@ if [ "$healthy" != true ]; then
   echo "새 슬롯이 응답하지 않아 제거한다"
   docker logs --tail 30 "ai-live-$NEW" 2>&1 || true
   docker logs --tail 30 "ai-analysis-$NEW" 2>&1 || true
-  docker rm -f "ai-live-$NEW" "ai-analysis-$NEW"
+  docker rm -f "ai-live-$NEW" "ai-analysis-$NEW" 2> /dev/null || true
   exit 1
 fi
 echo "새 슬롯 정상: $NEW"
@@ -116,13 +132,18 @@ if [ -f "$BASE/docker-compose.yml" ]; then
   mv "$BASE/docker-compose.yml" "$BASE/docker-compose.yml.mock-initial"
 fi
 
-# 7. nginx 전환. 녹음 WebSocket과 긴 분석 요청이 끊기지 않도록 시간 제한을 넉넉히 둔다
+# 7. nginx 전환. 녹음 WebSocket과 긴 분석 요청이 끊기지 않도록 시간 제한을 넉넉히 둔다.
+#    이 인스턴스에서 띄운 컨테이너의 포트만 받는다
 cat > "$NGINX_CONF.new" << EOF
-# deploy-v2-staging.sh가 관리한다. 사용 중인 슬롯: $NEW
+# deploy-v2-staging.sh가 관리한다. 사용 중인 슬롯: $NEW, 컨테이너: $ROLES
 map \$http_upgrade \$connection_upgrade {
   default upgrade;
   ''      close;
 }
+EOF
+
+if has_role live; then
+  cat >> "$NGINX_CONF.new" << EOF
 
 server {
   listen 8000;
@@ -136,6 +157,11 @@ server {
     proxy_send_timeout 3h;
   }
 }
+EOF
+fi
+
+if has_role analysis; then
+  cat >> "$NGINX_CONF.new" << EOF
 
 server {
   listen 8001;
@@ -149,12 +175,13 @@ server {
   }
 }
 EOF
+fi
 cp -f "$NGINX_CONF" "$NGINX_CONF.prev" 2> /dev/null || true
 mv "$NGINX_CONF.new" "$NGINX_CONF"
 if ! nginx -t; then
   echo "nginx 설정 오류. 이전 설정으로 되돌리고 새 슬롯을 지운다"
   if [ -f "$NGINX_CONF.prev" ]; then mv "$NGINX_CONF.prev" "$NGINX_CONF"; else rm -f "$NGINX_CONF"; fi
-  docker rm -f "ai-live-$NEW" "ai-analysis-$NEW"
+  docker rm -f "ai-live-$NEW" "ai-analysis-$NEW" 2> /dev/null || true
   exit 1
 fi
 systemctl enable -q nginx
@@ -162,8 +189,8 @@ if systemctl is-active -q nginx; then systemctl reload nginx; else systemctl sta
 echo "$NEW" > "$ACTIVE_FILE"
 
 # 8. nginx를 거쳐 새 슬롯이 응답하는지 확인
-curl -fsS -o /dev/null http://127.0.0.1:8000/healthz
-curl -fsS -o /dev/null http://127.0.0.1:8001/healthz
+if has_role live; then curl -fsS -o /dev/null http://127.0.0.1:8000/healthz; fi
+if has_role analysis; then curl -fsS -o /dev/null http://127.0.0.1:8001/healthz; fi
 echo "nginx 전환 완료: $NEW"
 
 # 9. 이전 슬롯은 연결이 모두 끝나면 정리한다 (최대 3시간). 배포 명령이 끝나도 계속 돌도록 systemd로 실행한다
