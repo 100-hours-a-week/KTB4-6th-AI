@@ -1,5 +1,5 @@
 # .github/workflows/cicd.yml
-# (dev/main push(머지) → 테스트 → 이미지 push → OIDC로 AWS 인증 → 환경별 EC2 배포)
+# dev 머지는 V2 staging, main 머지는 운영으로 자동 배포한다. dev 인스턴스는 수동 배포 전용이다.
 
 name: AI 테스트·빌드 및 배포
 
@@ -117,13 +117,14 @@ jobs:
           curl -H "Content-Type: application/json" -X POST -d "{\"content\": \"❌ [이미지 빌드 실패] ${{ github.repository }}\nBranch: ${{ github.ref_name }} (${{ github.sha }})\nAuthor: ${{ github.actor }}\nFailed Job: docker-build(push)\nError Message: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" "${{ secrets.DISCORD_WEBHOOK_URL }}"
 
   deploy:
-    name: AI EC2 배포
+    name: AI 운영 EC2 배포
     needs: [docker-build, deploy-modal]
+    # 기존 dev 인스턴스는 수동 배포 전용으로 두고 main만 운영에 배포한다.
+    if: ${{ github.ref_name == 'main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # dev는 스테이징 EC2, main은 운영 EC2를 선택한다.
     environment:
-      name: ${{ github.ref_name == 'dev' && 'staging' || 'production' }}
+      name: production
     permissions:
       id-token: write
       contents: read
@@ -131,7 +132,7 @@ jobs:
       group: deploy-ai-${{ github.ref_name }}
       cancel-in-progress: false
     env:
-      DEPLOY_ENV: ${{ github.ref_name == 'dev' && 'staging' || 'production' }}
+      DEPLOY_ENV: production
       IMAGE_TAG: ${{ needs.docker-build.outputs.image_tag }}
       AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}     # 선택된 환경에서 OIDC로 Assume할 IAM Role ARN
       INSTANCE_ID: ${{ secrets.AI_INSTANCE_ID }}    # 선택된 환경의 AI EC2 Instance ID
@@ -221,10 +222,10 @@ jobs:
 
   deploy-v2-staging:
     name: AI V2 staging 무중단 배포
-    # Modal 화자 분리 함수는 V1 dev(staging Environment)에 배포된 것을 같이 쓴다.
+    # Modal 화자 분리 함수는 deploy-modal이 staging Environment 토큰으로 배포한다.
     needs: [docker-build, deploy-modal]
-    # V1 dev 배포와 별개로 실행한다. 저장소 변수로 켜고 끈다.
-    if: ${{ github.ref_name == 'dev' && vars.V2_STAGING_DEPLOY_ENABLED == 'true' }}
+    # dev 브랜치의 자동 배포 대상은 V2 staging으로 고정한다.
+    if: ${{ github.ref_name == 'dev' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment:
