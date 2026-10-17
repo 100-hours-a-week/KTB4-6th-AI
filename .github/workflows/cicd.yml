@@ -250,9 +250,8 @@ jobs:
       AWS_REGION: ap-northeast-2
       TARGET: ${{ matrix.target }}
       INSTANCE_ID: ${{ secrets[matrix.instance_id_secret] }}
-      # 인스턴스에서 띄울 컨테이너. live 인스턴스는 BE의 AI_HTTP_URL이 analysis 인스턴스로 바뀔 때까지 analysis도 함께 띄운다.
-      # BE 전환이 끝나면 live 인스턴스 값을 'live'로 바꾼다. 다음 배포 때 이전 슬롯의 analysis 컨테이너가 정리된다
-      ROLES: ${{ matrix.target == 'analysis' && 'analysis' || 'live analysis' }}
+      # 인스턴스에서 띄울 컨테이너. live 인스턴스는 live만, analysis 인스턴스는 analysis만 띄운다
+      ROLES: ${{ matrix.target == 'analysis' && 'analysis' || 'live' }}
       IMAGE: ${{ vars.DOCKERHUB_USERNAME }}/meety-ai@${{ needs.docker-build.outputs.image_digest }}
       # mock: 가짜 공급자 앱(비용 없음), real: 실제 공급자 호출. Environment 변수로 바꾼 뒤 이 job을 다시 실행한다.
       MODE: ${{ vars.AI_PROVIDER_MODE || 'mock' }}
