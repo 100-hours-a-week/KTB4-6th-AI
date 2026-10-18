@@ -4,6 +4,8 @@
 
 Accepted — 2026-09-09
 
+QnA는 [ADR-0010](0010-backend-ai-chatbot-http-200.md)에 따라 회의 분석 AI의 HTTP API로 제공한다. QnA의 통신 방식과 배포 위치는 ADR-0010을 따르며, 나머지 실행·배포 경계는 유지한다.
+
 ---
 
 ## Context

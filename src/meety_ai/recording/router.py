@@ -29,14 +29,16 @@ logger = structlog.stdlib.get_logger(__name__)
 
 recording_router = APIRouter()
 MAX_TEXT_SIZE = 4 * 1024
-MAX__RECORDING_CONNECTIONS = 20
 BINARY_WAIT_TIMEOUT = 10
 STT_STOP_TIMEOUT = 30
 
 
 @recording_router.websocket("/v1/live-meeting")
 async def start_recording_session(websocket: WebSocket) -> None:
-    if websocket.app.state.recording_connections >= MAX__RECORDING_CONNECTIONS:
+    if (
+        websocket.app.state.recording_connections
+        >= websocket.app.state.settings.max_recording_connections
+    ):
         logger.warning(
             "recording_rejected",
             reason="capacity_exceeded",

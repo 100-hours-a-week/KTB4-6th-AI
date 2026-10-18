@@ -18,6 +18,7 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from meety_ai import analysis, live
+from meety_ai.metric.schemas import MetricClassification
 from meety_ai.summary.chain import create_summary_chain
 
 # 16 kHz mono pcm_s16le 1초 분량.
@@ -140,4 +141,10 @@ def create_analysis_app() -> FastAPI:
         fake_chat_model(latency.summary_latency_ms / 1000)
     )
     app.state.diarize = partial(fake_diarize, latency_seconds=latency.diarization_latency_ms / 1000)
+
+    async def classify_metric(inputs: Any) -> MetricClassification:
+        await asyncio.sleep(latency.summary_latency_ms / 1000)
+        return MetricClassification(agendas=[], off_topic=[])
+
+    app.state.metric_chain = RunnableLambda(classify_metric)
     return app
