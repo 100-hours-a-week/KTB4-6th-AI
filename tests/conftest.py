@@ -1,23 +1,15 @@
 import pytest
 
-import meety_ai.recording.router as router_module
+import meety_ai.live as live_module
+from meety_ai.stt.schemas import STTTranscript
 
 
 @pytest.fixture(autouse=True)
 def fake_speechmatics_client(monkeypatch):
     instances = []
-    transcript = {
-        "message": "AddTranscript",
-        "metadata": {"transcript": "안녕하세요."},
-        "results": [
-            {
-                "type": "word",
-                "start_time": 0.1,
-                "end_time": 0.4,
-                "alternatives": [{"content": "안녕하세요.", "confidence": 0.99, "speaker": "S1"}],
-            }
-        ],
-    }
+    transcript = STTTranscript(
+        content="안녕하세요.", started_at_ms=100, ended_at_ms=400, speaker_id=0
+    )
 
     class FakeSpeechmaticsClient:
         def __init__(self, api_key, on_transcript, on_error=None):
@@ -49,7 +41,7 @@ def fake_speechmatics_client(monkeypatch):
 
     monkeypatch.setenv("SPEECHMATICS_API_KEY", "test-api-key")
     monkeypatch.setattr(
-        router_module,
+        live_module,
         "SpeechmaticsClient",
         FakeSpeechmaticsClient,
         raising=False,

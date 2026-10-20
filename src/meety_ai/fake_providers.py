@@ -19,6 +19,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from meety_ai import analysis, live
 from meety_ai.metric.schemas import MetricClassification
+from meety_ai.stt.schemas import STTTranscript
 from meety_ai.summary.chain import create_summary_chain
 
 # 16 kHz mono pcm_s16le 1초 분량.
@@ -31,8 +32,7 @@ class FakeSpeechmaticsClient:
 
     def __init__(
         self,
-        api_key: str,
-        on_transcript: Callable[[dict[str, Any]], None],
+        on_transcript: Callable[[STTTranscript], None],
         on_error: Callable[[Exception], None] | None = None,
         latency_seconds: float = 0.0,
     ) -> None:
@@ -45,7 +45,7 @@ class FakeSpeechmaticsClient:
     async def start(self) -> None:
         await asyncio.sleep(self._latency)
 
-    async def _emit_transcript(self, message: dict[str, Any]) -> None:
+    async def _emit_transcript(self, message: STTTranscript) -> None:
         await asyncio.sleep(self._latency)
         self._on_transcript(message)
 
@@ -54,17 +54,12 @@ class FakeSpeechmaticsClient:
         while (self._emitted_seconds + 1) * PCM_BYTES_PER_SECOND <= self._pcm_bytes:
             start = self._emitted_seconds
             self._emitted_seconds += 1
-            message = {
-                "message": "AddTranscript",
-                "results": [
-                    {
-                        "type": "word",
-                        "start_time": start,
-                        "end_time": start + 1,
-                        "alternatives": [{"content": "테스트 발화입니다.", "speaker": "S1"}],
-                    }
-                ],
-            }
+            message = STTTranscript(
+                content="테스트 발화입니다.",
+                started_at_ms=start * 1000,
+                ended_at_ms=(start + 1) * 1000,
+                speaker_id=0,
+            )
             task = asyncio.create_task(self._emit_transcript(message))
             self._pending.add(task)
             task.add_done_callback(self._pending.discard)
