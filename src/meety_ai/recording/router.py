@@ -11,9 +11,7 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from structlog.contextvars import bind_contextvars
 
-from meety_ai.recording.decoder import AudioDecodeError
 from meety_ai.recording.schemas import (
-    DecoderReset,
     SessionEnded,
     SessionError,
     SessionErrorPayload,
@@ -143,9 +141,6 @@ async def start_recording_session(websocket: WebSocket) -> None:
                         # @debt
                         sender_task = asyncio.create_task(forward_transcripts(event))
 
-                    if isinstance(event, DecoderReset):
-                        logger.info("decoder_reset", audio_format=event.payload.audio_format)
-
                     if isinstance(event, SessionStop):
                         async with asyncio.timeout(STT_STOP_TIMEOUT):
                             await stt_client.finish()
@@ -174,7 +169,6 @@ async def start_recording_session(websocket: WebSocket) -> None:
         except (
             ValidationError,
             SessionProtocolError,
-            AudioDecodeError,
             TimeoutError,
             STTProviderError,
         ) as error:
@@ -187,15 +181,13 @@ async def start_recording_session(websocket: WebSocket) -> None:
                 code, message = "invalid_message", "메시지 형식이 올바르지 않습니다."
             elif isinstance(error, SessionProtocolError):
                 code, message = error.code, str(error)
-            elif isinstance(error, AudioDecodeError):
-                code, message = "audio_decode_failed", "오디오 처리에 실패했습니다."
             else:
                 code, message = "processing_timeout", "처리 대기 시간이 초과됐습니다."
 
             close_code = 1008
             if code == "message_too_large":
                 close_code = 1009
-            elif code in ("audio_decode_failed", "processing_timeout", "provider_unavailable"):
+            elif code in ("processing_timeout", "provider_unavailable"):
                 close_code = 1011
 
             close_reason = "error"
