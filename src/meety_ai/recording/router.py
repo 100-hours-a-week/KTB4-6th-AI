@@ -1,17 +1,18 @@
 """Backend 전용 WebSocket의 수신·응답·연결 종료를 처리한다."""
 
 import asyncio
-import contextlib
 import time
 
 import sentry_sdk
 import structlog
+from anyio import CancelScope
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from structlog.contextvars import bind_contextvars
 
 from meety_ai.recording.schemas import (
+    AudioMeta,
     SessionEnded,
     SessionError,
     SessionErrorPayload,
@@ -21,7 +22,12 @@ from meety_ai.recording.schemas import (
 )
 from meety_ai.recording.session import RecordingSession, SessionProtocolError
 from meety_ai.recording.stt_client import SpeechmaticsClient, STTProviderError
-from meety_ai.recording.transcript import TranscriptMessage, TranscriptQueue, send_transcripts
+from meety_ai.recording.transcript import (
+    TranscriptMessage,
+    TranscriptQueue,
+    send_message,
+    send_transcripts,
+)
 
 logger = structlog.stdlib.get_logger(__name__)
 
@@ -29,6 +35,8 @@ recording_router = APIRouter()
 MAX_TEXT_SIZE = 4 * 1024
 BINARY_WAIT_TIMEOUT = 10
 STT_STOP_TIMEOUT = 30
+STT_SEND_TIMEOUT = 10
+MAX_PENDING_AUDIO_CHUNKS = 32
 
 
 @recording_router.websocket("/v1/live-meeting")
@@ -52,8 +60,12 @@ async def start_recording_session(websocket: WebSocket) -> None:
 
     api_key = websocket.app.state.settings.speechmatics_api_key
     transcript_queue: TranscriptQueue = asyncio.Queue()
+    audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=MAX_PENDING_AUDIO_CHUNKS)
     sender_task: asyncio.Task[None] | None = None
+    audio_task: asyncio.Task[None] | None = None
+    error_task: asyncio.Task[bool] | None = None
     background_error: Exception | None = None
+    background_failed = asyncio.Event()
     provider_error_reported = False
 
     def on_transcript(message: TranscriptMessage) -> None:
@@ -63,6 +75,7 @@ async def start_recording_session(websocket: WebSocket) -> None:
         nonlocal background_error
         if background_error is None:
             background_error = error
+            background_failed.set()
 
     def on_provider_error(error: Exception) -> None:
         nonlocal provider_error_reported
@@ -79,6 +92,33 @@ async def start_recording_session(websocket: WebSocket) -> None:
         if background_error is not None:
             raise background_error
 
+    async def wait_with_error(operation):
+        task = asyncio.ensure_future(operation)
+        try:
+            await asyncio.wait((task, error_task), return_when=asyncio.FIRST_COMPLETED)
+            raise_background_error()
+            return task.result()
+        finally:
+            task.cancel()
+            with CancelScope(shield=True):
+                await asyncio.gather(task, return_exceptions=True)
+
+    async def enqueue_audio(chunk: bytes) -> None:
+        try:
+            audio_queue.put_nowait(chunk)
+        except asyncio.QueueFull as error:
+            raise SessionProtocolError(
+                "audio_buffer_full", "STT 오디오 대기열이 가득 찼습니다."
+            ) from error
+
+    async def forward_audio() -> None:
+        try:
+            while (chunk := await audio_queue.get()) is not None:
+                async with asyncio.timeout(STT_SEND_TIMEOUT):
+                    await stt_client.send_audio(chunk)
+        except Exception as error:
+            on_error(error)
+
     async def forward_transcripts(event: SessionStart) -> None:
         try:
             await send_transcripts(
@@ -86,6 +126,8 @@ async def start_recording_session(websocket: WebSocket) -> None:
                 transcript_queue,
                 event.meeting_id,
                 event.recording_session_id,
+                start_sequence=event.start_sequence,
+                transcript_sequence_start=event.transcript_sequence_start,
             )
         except Exception as error:
             on_error(error)
@@ -98,7 +140,7 @@ async def start_recording_session(websocket: WebSocket) -> None:
         on_error=on_provider_error,
     )
 
-    session = RecordingSession(stt_client.send_audio)
+    session = RecordingSession(enqueue_audio)
     started = time.perf_counter()
     # 사유를 확인하지 못한 채 끝나면(예상하지 못한 예외 등) 오류로 기록한다.
     close_reason: str | None = None
@@ -106,14 +148,15 @@ async def start_recording_session(websocket: WebSocket) -> None:
     websocket.app.state.recording_connections += 1
     try:
         await websocket.accept()
+        error_task = asyncio.create_task(background_failed.wait())
+        binary_deadline: float | None = None
         try:
             while True:
                 request_id = None
                 raise_background_error()
 
-                timeout = BINARY_WAIT_TIMEOUT if session.expects_binary else None
-                async with asyncio.timeout(timeout):
-                    data = await websocket.receive()
+                async with asyncio.timeout_at(binary_deadline):
+                    data = await wait_with_error(websocket.receive())
 
                 raise_background_error()
 
@@ -138,23 +181,27 @@ async def start_recording_session(websocket: WebSocket) -> None:
                         )
                         logger.info("session_started")
                         await stt_client.start()
-                        # @debt
                         sender_task = asyncio.create_task(forward_transcripts(event))
+                        audio_task = asyncio.create_task(forward_audio())
+
+                    if isinstance(event, AudioMeta):
+                        binary_deadline = asyncio.get_running_loop().time() + BINARY_WAIT_TIMEOUT
 
                     if isinstance(event, SessionStop):
                         async with asyncio.timeout(STT_STOP_TIMEOUT):
-                            await stt_client.finish()
-                            raise_background_error()
+                            await wait_with_error(audio_queue.put(None))
+                            await wait_with_error(audio_task)
+                            await wait_with_error(stt_client.finish())
                             await transcript_queue.put(None)
-                            await sender_task
-                            raise_background_error()
+                            await wait_with_error(sender_task)
 
                 elif data.get("bytes") is not None:
                     audio_bytes += len(data["bytes"])
-                    await session.handle_binary(data["bytes"])
+                    response = await session.handle_binary(data["bytes"])
+                    binary_deadline = None
 
                 if response is not None:
-                    await websocket.send_json(response.model_dump(by_alias=True))
+                    await send_message(websocket, response)
 
                 if isinstance(response, SessionEnded):
                     logger.info(
@@ -181,13 +228,14 @@ async def start_recording_session(websocket: WebSocket) -> None:
                 code, message = "invalid_message", "메시지 형식이 올바르지 않습니다."
             elif isinstance(error, SessionProtocolError):
                 code, message = error.code, str(error)
+                retryable = code == "audio_buffer_full"
             else:
                 code, message = "processing_timeout", "처리 대기 시간이 초과됐습니다."
 
             close_code = 1008
             if code == "message_too_large":
                 close_code = 1009
-            elif code in ("processing_timeout", "provider_unavailable"):
+            elif code in ("processing_timeout", "provider_unavailable", "audio_buffer_full"):
                 close_code = 1011
 
             close_reason = "error"
@@ -206,7 +254,7 @@ async def start_recording_session(websocket: WebSocket) -> None:
                 request_id=request_id,
                 payload=SessionErrorPayload(code=code, message=message, retryable=retryable),
             )
-            await websocket.send_json(response.model_dump(by_alias=True, exclude_none=True))
+            await send_message(websocket, response)
             await websocket.close(code=close_code)
 
     except WebSocketDisconnect:
@@ -220,16 +268,18 @@ async def start_recording_session(websocket: WebSocket) -> None:
             duration_ms=round((time.perf_counter() - started) * 1000),
             audio_bytes=audio_bytes,
         )
-        try:
-            if sender_task is not None:
-                sender_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await sender_task
-        finally:
+        # ASGI 요청이 취소돼도 공급자와 백그라운드 작업은 끝까지 정리한다.
+        with CancelScope(shield=True):
             try:
-                await stt_client.close()
+                tasks = [task for task in (sender_task, audio_task, error_task) if task is not None]
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
             finally:
                 try:
-                    await session.close()
+                    await stt_client.close()
                 finally:
-                    websocket.app.state.recording_connections -= 1
+                    try:
+                        await session.close()
+                    finally:
+                        websocket.app.state.recording_connections -= 1

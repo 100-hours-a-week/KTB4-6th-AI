@@ -88,6 +88,7 @@ def test_recording_flow(fake_speechmatics_client):
 
             ws.send_json(meta_message)
             ws.send_bytes(b"\x01\x00" * 16000)
+            assert ws.receive_json()["type"] == "audio.ack"
             ws.send_json(stop_message)
             ended = ws.receive_json()
             assert ended == {
@@ -268,6 +269,8 @@ def test_connections_are_isolated_on_disconnect(fake_speechmatics_client):
 
                 ws_a.send_bytes(b"\x01\x00" * 8000)
                 ws_b.send_bytes(b"\x02\x00" * 8000)
+                assert ws_a.receive_json()["type"] == "audio.ack"
+                assert ws_b.receive_json()["type"] == "audio.ack"
 
                 ws_a.send_json({"type": "session.pause", "requestId": "pause-01"})
                 paused_a = ws_a.receive_json()
@@ -279,6 +282,7 @@ def test_connections_are_isolated_on_disconnect(fake_speechmatics_client):
 
                 ws_b.send_json({"type": "audio.meta", "payload": {"sequence": 1}})
                 ws_b.send_bytes(b"\x03\x00" * 8000)
+                assert ws_b.receive_json()["type"] == "audio.ack"
 
             # A는 stop 없이 끊긴 상태 (with문 바깥)
             provider_b, provider_a = fake_speechmatics_client
@@ -288,6 +292,7 @@ def test_connections_are_isolated_on_disconnect(fake_speechmatics_client):
 
             ws_b.send_json({"type": "audio.meta", "payload": {"sequence": 2}})
             ws_b.send_bytes(b"\x04\x00" * 8000)
+            assert ws_b.receive_json()["type"] == "audio.ack"
             ws_b.send_json(stop_message)
             ended_b = ws_b.receive_json()
             assert ended_b == {
@@ -327,6 +332,7 @@ def test_live_meeting_with_pcm(fake_speechmatics_client):
             for i, chunk in enumerate(chunks):
                 ws.send_json({"type": "audio.meta", "payload": {"sequence": i}})
                 ws.send_bytes(chunk)
+                assert ws.receive_json()["payload"]["sequence"] == i
 
             ws.send_json(stop_message)
             ended = ws.receive_json()
@@ -368,6 +374,7 @@ def test_committed_transcript_arrives_before_stop(fake_speechmatics_client):
 
             ws.send_json(meta_message)
             ws.send_bytes(b"\x01\x00" * 8000)
+            assert ws.receive_json()["type"] == "audio.ack"
 
             # STT 연결이 없다면 receive_json()에서 무한 대기하므로 먼저 배선을 확인한다.
             assert len(fake_speechmatics_client) == 1
@@ -594,3 +601,130 @@ def test_transcript_send_failure_stops_receiving(fake_speechmatics_client, monke
         assert provider.closed
         assert fake_speechmatics_client[0].fed == []
         assert app.state.recording_connections == 0
+
+
+# 테스트 이름: test_audio_ack_heartbeat_and_reconnection
+# 목적: STT 지연·중복 전송·일시정지·재연결 중에도 수신 ACK와 전사 이어받기가 동작한다.
+# 준비: 첫 STT 전송을 보류하고, 종료 시 마지막 확정 단어를 반환하는 공급자 대역.
+# 실행: 중간 순번 시작 → meta 사이 ping → binary/ACK → 중복 → pause/pong → resume.
+# 실행: 짧은 청크를 추가한 뒤 stop하고, 같은 녹음의 다음 순번으로 새 연결을 시작한다.
+# 기대 결과: STT 완료 전 ACK, 중복 입력 제거, 동일 requestId pong, 전사 번호·시간 이어받기.
+# 실패 조건: STT 지연으로 제어 응답이 막히거나 중복 PCM·전사 번호 초기화·정리 누락이 발생한다.
+def test_audio_ack_heartbeat_and_reconnection(fake_speechmatics_client):
+    app = create_live_app()
+    first_chunk = b"\x01\x00" * 1600
+    short_chunk = b"\x02\x00" * 320
+
+    with TestClient(app) as client:
+        for connection_index, sequence in enumerate((100, 102)):
+            with client.websocket_connect(WEBSOCKET_URL) as ws:
+                ws.send_json(
+                    {
+                        **start_message,
+                        "startSequence": sequence,
+                        "transcriptSequenceStart": 7 + connection_index,
+                    }
+                )
+                assert ws.receive_json()["type"] == "session.ready"
+                provider = fake_speechmatics_client[connection_index]
+                release = client.portal.call(asyncio.Event)
+                sending = Event()
+
+                async def send_audio(chunk, *, sending=sending, release=release, provider=provider):
+                    sending.set()
+                    await release.wait()
+                    provider.fed.append(chunk)
+
+                async def finish(provider=provider):
+                    provider.on_transcript(
+                        {
+                            "results": [
+                                {
+                                    "type": "word",
+                                    "start_time": 0.02,
+                                    "end_time": 0.08,
+                                    "alternatives": [{"content": "이어가기", "speaker": "S1"}],
+                                }
+                            ]
+                        }
+                    )
+                    provider.finished = True
+
+                provider.send_audio = send_audio
+                provider.finish = finish
+
+                def ping(request_id):
+                    ws.send_json(
+                        {
+                            "type": "heartbeat.ping",
+                            "requestId": request_id,
+                            "recordingSessionId": "1",
+                        }
+                    )
+                    assert ws.receive_json() == {
+                        "type": "heartbeat.pong",
+                        "requestId": request_id,
+                        "recordingSessionId": 1,
+                    }
+
+                def expect_ack(acked_sequence):
+                    assert ws.receive_json() == {
+                        "type": "audio.ack",
+                        "recordingSessionId": 1,
+                        "payload": {"sequence": acked_sequence},
+                    }
+
+                # 새 연결은 BE checkpoint 이전의 재전송도 다시 STT에 넣지 않는다.
+                if connection_index:
+                    ws.send_json({"type": "audio.meta", "payload": {"sequence": sequence - 1}})
+                    ws.send_bytes(short_chunk)
+                    expect_ack(sequence - 1)
+
+                ws.send_json({"type": "audio.meta", "payload": {"sequence": sequence}})
+                ping("between-meta-and-binary")
+                ws.send_bytes(first_chunk)
+                expect_ack(sequence)
+                assert sending.wait(1), "STT 전달 작업이 시작되지 않았습니다."
+                assert provider.fed == []
+
+                ws.send_json({"type": "audio.meta", "payload": {"sequence": sequence}})
+                ws.send_bytes(first_chunk)
+                expect_ack(sequence)
+
+                ws.send_json({"type": "session.pause", "requestId": "pause-ack"})
+                assert ws.receive_json()["type"] == "session.paused"
+                ping("while-paused")
+                ws.send_json({"type": "session.resume", "requestId": "resume-ack"})
+                assert ws.receive_json()["type"] == "session.resumed"
+                assert len(fake_speechmatics_client) == connection_index + 1
+
+                expected_pcm = [first_chunk]
+                if not connection_index:
+                    ws.send_json({"type": "audio.meta", "payload": {"sequence": sequence + 1}})
+                    ws.send_bytes(short_chunk)
+                    expect_ack(sequence + 1)
+                    # 예전 중복에도 ACK는 마지막 수신 순번에서 뒤로 가지 않는다.
+                    ws.send_json({"type": "audio.meta", "payload": {"sequence": sequence}})
+                    ws.send_bytes(first_chunk)
+                    expect_ack(sequence + 1)
+                    expected_pcm.append(short_chunk)
+
+                client.portal.call(release.set)
+                ws.send_json(stop_message)
+                transcript = ws.receive_json()
+                assert transcript["type"] == "transcript.committed"
+                assert transcript["payload"]["sequenceNumber"] == 7 + connection_index
+                assert transcript["payload"]["startedAtMs"] == sequence * 100 + 20
+                assert transcript["payload"]["endedAtMs"] == sequence * 100 + 80
+                ended = ws.receive_json()
+                assert ended["type"] == "session.ended"
+                assert ended["payload"]["lastSequence"] == sequence + (connection_index == 0)
+                assert ended["payload"]["audioDurationMs"] == (120 if not connection_index else 100)
+                with pytest.raises(WebSocketDisconnect) as error:
+                    ws.receive_json()
+                assert error.value.code == 1000
+
+            assert provider.fed == expected_pcm
+            assert provider.finished
+            assert provider.closed
+            assert app.state.recording_connections == 0

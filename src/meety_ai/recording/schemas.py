@@ -21,6 +21,10 @@ class SessionStart(Message):
     recording_session_id: RecordingSessionId = Field(strict=False)
     participant_count: NonNegativeInt
     participants: list[SessionParticipant]
+    start_sequence: NonNegativeInt = Field(
+        default=0, description="0부터 세는 녹음 전체 오디오 순번"
+    )
+    transcript_sequence_start: NonNegativeInt = Field(default=0, description="첫 전사에 붙일 순번")
 
 
 class SessionReadyPayload(Message):
@@ -60,6 +64,24 @@ class AudioMetaPayload(Message):
 class AudioMeta(Message):
     type: Literal["audio.meta"]
     payload: AudioMetaPayload
+
+
+class AudioAck(Message):
+    type: Literal["audio.ack"]
+    recording_session_id: RecordingSessionId
+    payload: AudioMetaPayload
+
+
+class HeartbeatPing(Message):
+    type: Literal["heartbeat.ping"]
+    request_id: Identifier
+    recording_session_id: RecordingSessionId = Field(strict=False)
+
+
+class HeartbeatPong(Message):
+    type: Literal["heartbeat.pong"]
+    request_id: Identifier
+    recording_session_id: RecordingSessionId
 
 
 class SessionPause(Message):
@@ -121,6 +143,7 @@ class SessionErrorPayload(Message):
         "message_too_large",
         "provider_unavailable",
         "processing_timeout",
+        "audio_buffer_full",
     ]
     message: str
     retryable: Literal[True, False]
@@ -133,7 +156,7 @@ class SessionError(Message):
 
 
 ClientEvent = Annotated[
-    SessionStart | AudioMeta | SessionPause | SessionResume | SessionStop,
+    SessionStart | AudioMeta | HeartbeatPing | SessionPause | SessionResume | SessionStop,
     Field(discriminator="type"),
 ]
 
