@@ -1,13 +1,16 @@
 """연결별 녹음 상태와 오디오 처리 순서를 관리한다."""
 
-import asyncio
 from collections.abc import Awaitable, Callable
 from enum import StrEnum
 
 from meety_ai.core.schemas import MeetingId, RecordingSessionId
 from meety_ai.recording.schemas import (
+    AudioAck,
     AudioMeta,
+    AudioMetaPayload,
     ClientEvent,
+    HeartbeatPing,
+    HeartbeatPong,
     Message,
     SessionEnded,
     SessionEndedPayload,
@@ -24,7 +27,6 @@ from meety_ai.recording.schemas import (
 )
 
 MAX_AUDIO_CHUNK_SIZE = 256 * 1024
-STT_SEND_TIMEOUT = 10
 
 
 class SessionState(StrEnum):
@@ -49,6 +51,7 @@ class RecordingSession:
         self._recording_session_id: RecordingSessionId | None = None
 
         self._last_sequence: int | None = None
+        self._next_sequence = 0
         self._pending_sequence: int | None = None
         self._pcm_bytes = 0
 
@@ -59,6 +62,8 @@ class RecordingSession:
             raise SessionProtocolError("invalid_state", "이미 시작한 세션입니다.")
         self._meeting_id = event.meeting_id
         self._recording_session_id = event.recording_session_id
+        # shortcut: 재연결 중복 판정은 BE checkpoint를 신뢰하며, 영속 복구가 필요하면 재설계한다.
+        self._next_sequence = event.start_sequence
         self._state = SessionState.READY
 
         return SessionReady(
@@ -78,8 +83,7 @@ class RecordingSession:
         if self._state is not SessionState.READY:
             raise SessionProtocolError("invalid_state", "세션이 준비되지 않았습니다.")
 
-        expected_sequence = 0 if self._last_sequence is None else self._last_sequence + 1
-        if event.payload.sequence != expected_sequence:
+        if event.payload.sequence > self._next_sequence:
             raise SessionProtocolError("invalid_sequence", "sequence가 연속되지 않습니다.")
 
         self._pending_sequence = event.payload.sequence
@@ -133,6 +137,16 @@ class RecordingSession:
         return self._pending_sequence is not None
 
     async def handle_event(self, event: ClientEvent) -> Message | None:
+        if isinstance(event, HeartbeatPing):
+            if self._state not in (SessionState.READY, SessionState.PAUSED):
+                raise SessionProtocolError("invalid_state", "세션이 시작되지 않았습니다.")
+            if event.recording_session_id != self._recording_session_id:
+                raise SessionProtocolError("invalid_message", "녹음 세션 ID가 일치하지 않습니다.")
+            return HeartbeatPong(
+                type="heartbeat.pong",
+                request_id=event.request_id,
+                recording_session_id=self._recording_session_id,
+            )
         if self.expects_binary:
             raise SessionProtocolError(
                 "expected_binary", "audio.meta 다음에는 binary가 전송되어야 합니다."
@@ -148,7 +162,7 @@ class RecordingSession:
         if isinstance(event, SessionStop):
             return await self._stop(event)
 
-    async def handle_binary(self, chunk: bytes) -> None:
+    async def handle_binary(self, chunk: bytes) -> AudioAck:
         if self._state is not SessionState.READY:
             raise SessionProtocolError("invalid_state", "오디오를 받을 수 없는 상태입니다.")
         if not self.expects_binary:
@@ -163,17 +177,17 @@ class RecordingSession:
         if len(chunk) % 2:
             raise SessionProtocolError("invalid_message", "PCM 청크는 16비트 샘플 단위여야 합니다.")
 
-        try:
-            async with asyncio.timeout(STT_SEND_TIMEOUT):
-                await self._on_pcm(chunk)
-        except TimeoutError as error:
-            raise SessionProtocolError(
-                "processing_timeout", "STT 오디오 전송 시간이 초과됐습니다."
-            ) from error
-
-        self._pcm_bytes += len(chunk)
-        self._last_sequence = self._pending_sequence
+        if self._pending_sequence == self._next_sequence:
+            await self._on_pcm(chunk)
+            self._pcm_bytes += len(chunk)
+            self._last_sequence = self._pending_sequence
+            self._next_sequence += 1
         self._pending_sequence = None
+        return AudioAck(
+            type="audio.ack",
+            recording_session_id=self._recording_session_id,
+            payload=AudioMetaPayload(sequence=self._next_sequence - 1),
+        )
 
     async def close(self) -> None:
         self._state = SessionState.ENDED

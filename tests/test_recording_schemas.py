@@ -111,6 +111,7 @@ def test_recording_accepts_backend_numeric_string_ids_and_returns_integer_ids(
 
             ws.send_json(meta_message)
             ws.send_bytes(b"\x01\x00" * 8000)
+            assert ws.receive_json()["type"] == "audio.ack"
             fake_speechmatics_client[0].emit_transcript()
             transcript = ws.receive_json()
             assert transcript["type"] == "transcript.committed"

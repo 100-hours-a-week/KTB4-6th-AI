@@ -36,9 +36,13 @@ async def send_transcripts(
     queue: TranscriptQueue,
     meeting_id: MeetingId,
     recording_session_id: RecordingSessionId,
+    start_sequence: int = 0,
+    transcript_sequence_start: int = 0,
 ) -> None:
     """확정 단어를 문장·화자·최대 길이 기준으로 묶어 전송한다."""
-    sequence_number = 0
+    sequence_number = transcript_sequence_start
+    # shortcut: 짧은 청크의 오차를 허용하며, 정확한 복구가 필요하면 누적 샘플 위치를 전달한다.
+    time_offset_ms = start_sequence * 100
     buffered_text = ""
     started_at: float | None = None
     ended_at: float | None = None
@@ -56,8 +60,8 @@ async def send_transcripts(
             payload=TranscriptCommittedPayload(
                 sequence_number=sequence_number,
                 content=buffered_text.strip(),
-                started_at_ms=round(started_at * 1000),
-                ended_at_ms=round(ended_at * 1000),
+                started_at_ms=time_offset_ms + round(started_at * 1000),
+                ended_at_ms=time_offset_ms + round(ended_at * 1000),
                 recognized_at=datetime.now(UTC),
             ),
         )
