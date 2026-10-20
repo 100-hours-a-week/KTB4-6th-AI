@@ -47,6 +47,7 @@ class TranscriptCommittedPayload(Message):
     content: str
     started_at_ms: NonNegativeInt
     ended_at_ms: NonNegativeInt
+    speaker_id: NonNegativeInt | None = None
     recognized_at: datetime
 
 

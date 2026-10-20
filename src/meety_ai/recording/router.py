@@ -21,13 +21,13 @@ from meety_ai.recording.schemas import (
     client_event_adapter,
 )
 from meety_ai.recording.session import RecordingSession, SessionProtocolError
-from meety_ai.recording.stt_client import SpeechmaticsClient, STTProviderError
 from meety_ai.recording.transcript import (
-    TranscriptMessage,
     TranscriptQueue,
     send_message,
     send_transcripts,
 )
+from meety_ai.stt.client import STTClient, STTProviderError
+from meety_ai.stt.schemas import STTTranscript
 
 logger = structlog.stdlib.get_logger(__name__)
 
@@ -58,7 +58,6 @@ async def start_recording_session(websocket: WebSocket) -> None:
         )
         return
 
-    api_key = websocket.app.state.settings.speechmatics_api_key
     transcript_queue: TranscriptQueue = asyncio.Queue()
     audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=MAX_PENDING_AUDIO_CHUNKS)
     sender_task: asyncio.Task[None] | None = None
@@ -68,7 +67,7 @@ async def start_recording_session(websocket: WebSocket) -> None:
     background_failed = asyncio.Event()
     provider_error_reported = False
 
-    def on_transcript(message: TranscriptMessage) -> None:
+    def on_transcript(message: STTTranscript) -> None:
         transcript_queue.put_nowait(message)
 
     def on_error(error: Exception) -> None:
@@ -132,10 +131,7 @@ async def start_recording_session(websocket: WebSocket) -> None:
         except Exception as error:
             on_error(error)
 
-    # 부하테스트 진입점은 app.state에 가짜 클라이언트를 넣는다.
-    stt_client_factory = getattr(websocket.app.state, "stt_client_factory", SpeechmaticsClient)
-    stt_client = stt_client_factory(
-        api_key=api_key.get_secret_value(),
+    stt_client: STTClient = websocket.app.state.stt_client_factory(
         on_transcript=on_transcript,
         on_error=on_provider_error,
     )

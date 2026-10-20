@@ -1,8 +1,7 @@
-"""Speechmatics 결과를 문장 단위 Backend 메시지로 조립한다."""
+"""공통 전사 구간을 Backend 메시지로 전송한다."""
 
 import asyncio
 from datetime import UTC, datetime
-from typing import Any
 
 from fastapi import WebSocket
 
@@ -13,12 +12,10 @@ from meety_ai.recording.schemas import (
     TranscriptCommitted,
     TranscriptCommittedPayload,
 )
+from meety_ai.stt.schemas import STTTranscript
 
-MAX_TRANSCRIPT_DURATION_SECONDS = 10
 MESSAGE_SEND_TIMEOUT = 10
-SENTENCE_ENDINGS = (".", "?", "!")
-TranscriptMessage = dict[str, Any]
-TranscriptQueue = asyncio.Queue[TranscriptMessage | None]
+TranscriptQueue = asyncio.Queue[STTTranscript | None]
 
 
 async def send_message(websocket: WebSocket, message: Message) -> None:
@@ -39,78 +36,23 @@ async def send_transcripts(
     start_sequence: int = 0,
     transcript_sequence_start: int = 0,
 ) -> None:
-    """확정 단어를 문장·화자·최대 길이 기준으로 묶어 전송한다."""
+    """확정 전사에 회의 식별자·전사 번호·재연결 시간 오프셋을 붙여 전송한다."""
     sequence_number = transcript_sequence_start
     # shortcut: 짧은 청크의 오차를 허용하며, 정확한 복구가 필요하면 누적 샘플 위치를 전달한다.
     time_offset_ms = start_sequence * 100
-    buffered_text = ""
-    started_at: float | None = None
-    ended_at: float | None = None
-    current_speaker: str | None = None
-
-    async def flush() -> None:
-        nonlocal sequence_number, buffered_text, started_at, ended_at, current_speaker
-        if not buffered_text or started_at is None or ended_at is None:
-            return
-
+    while (segment := await queue.get()) is not None:
         transcript = TranscriptCommitted(
             type="transcript.committed",
             meeting_id=meeting_id,
             recording_session_id=recording_session_id,
             payload=TranscriptCommittedPayload(
                 sequence_number=sequence_number,
-                content=buffered_text.strip(),
-                started_at_ms=time_offset_ms + round(started_at * 1000),
-                ended_at_ms=time_offset_ms + round(ended_at * 1000),
+                content=segment.content,
+                started_at_ms=time_offset_ms + segment.started_at_ms,
+                ended_at_ms=time_offset_ms + segment.ended_at_ms,
+                speaker_id=segment.speaker_id,
                 recognized_at=datetime.now(UTC),
             ),
         )
         await send_message(websocket, transcript)
         sequence_number += 1
-        buffered_text = ""
-        started_at = None
-        ended_at = None
-        current_speaker = None
-
-    while True:
-        message = await queue.get()
-        if message is None:
-            await flush()
-            return
-
-        results = message.get("results", [])
-        for index, result in enumerate(results):
-            alternatives = result.get("alternatives", [])
-            if not alternatives:
-                continue
-            content = alternatives[0].get("content", "")
-            if not content:
-                continue
-
-            speaker = alternatives[0].get("speaker")
-            if (
-                result.get("type") == "word"
-                and current_speaker is not None
-                and speaker != current_speaker
-            ):
-                await flush()
-
-            if started_at is None:
-                started_at = result["start_time"]
-            ended_at = result["end_time"]
-            current_speaker = speaker
-
-            if result.get("type") == "punctuation":
-                buffered_text = buffered_text.rstrip() + content
-            else:
-                buffered_text += (" " if buffered_text else "") + content
-
-            next_is_punctuation = (
-                index + 1 < len(results) and results[index + 1].get("type") == "punctuation"
-            )
-            if content.endswith(SENTENCE_ENDINGS):
-                await flush()
-            elif (
-                ended_at - started_at >= MAX_TRANSCRIPT_DURATION_SECONDS and not next_is_punctuation
-            ):
-                await flush()

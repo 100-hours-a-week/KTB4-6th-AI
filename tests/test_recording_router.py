@@ -11,6 +11,7 @@ from starlette.websockets import WebSocketDisconnect
 
 import meety_ai.recording.router as router_module
 from meety_ai.live import create_live_app
+from meety_ai.stt.schemas import STTTranscript
 
 WEBSOCKET_URL = "/v1/live-meeting"
 CHUNK_SIZE = 16 * 1024
@@ -358,7 +359,7 @@ def test_live_meeting_with_pcm(fake_speechmatics_client):
 # 기대 결과: meetingId와 recordingSessionId가 시작 요청과 일치한다.
 # 기대 결과: payload는 sequenceNumber=0, content="안녕하세요.",
 # 기대 결과: startedAtMs=100, endedAtMs=400이며 recognizedAt은 UTC 시각이다.
-# 기대 결과: 화자 필드가 없고, 전사 수신 시점까지 session.ended가 오지 않는다.
+# 기대 결과: speakerId=0이고, 전사 수신 시점까지 session.ended가 오지 않는다.
 # 실패 조건: stop 또는 다음 입력까지 결과가 보류되거나 PCM·ID·내용·시간이 잘못 전달된다.
 # 정리: 성공·실패 모두 Backend 연결을 닫고 공급자 연결과 작업을 정리한다.
 # 주의: receive_json에는 자체 timeout이 없다. 실행 시 테스트 프로세스에 기한을 두고,
@@ -390,7 +391,7 @@ def test_committed_transcript_arrives_before_stop(fake_speechmatics_client):
             assert payload["content"] == "안녕하세요."
             assert payload["startedAtMs"] == 100
             assert payload["endedAtMs"] == 400
-            assert "speaker" not in payload
+            assert payload["speakerId"] == 0
 
             recognized_at = datetime.fromisoformat(payload["recognizedAt"].replace("Z", "+00:00"))
             assert recognized_at.utcoffset() == timedelta(0)
@@ -494,17 +495,7 @@ def test_final_transcript_precedes_session_ended(fake_speechmatics_client):
 
             async def finish_with_final_transcript():
                 provider.on_transcript(
-                    {
-                        "message": "AddTranscript",
-                        "results": [
-                            {
-                                "type": "word",
-                                "start_time": 1.0,
-                                "end_time": 1.5,
-                                "alternatives": [{"content": "마지막", "speaker": "S1"}],
-                            }
-                        ],
-                    }
+                    STTTranscript(content="마지막", started_at_ms=1000, ended_at_ms=1500)
                 )
                 provider.finished = True
 
@@ -515,6 +506,7 @@ def test_final_transcript_precedes_session_ended(fake_speechmatics_client):
             ended = ws.receive_json()
             assert transcript["type"] == "transcript.committed"
             assert transcript["payload"]["content"] == "마지막"
+            assert transcript["payload"]["speakerId"] is None
             assert ended["type"] == "session.ended"
 
             with pytest.raises(WebSocketDisconnect) as error:
@@ -637,16 +629,7 @@ def test_audio_ack_heartbeat_and_reconnection(fake_speechmatics_client):
 
                 async def finish(provider=provider):
                     provider.on_transcript(
-                        {
-                            "results": [
-                                {
-                                    "type": "word",
-                                    "start_time": 0.02,
-                                    "end_time": 0.08,
-                                    "alternatives": [{"content": "이어가기", "speaker": "S1"}],
-                                }
-                            ]
-                        }
+                        STTTranscript(content="이어가기", started_at_ms=20, ended_at_ms=80)
                     )
                     provider.finished = True
 

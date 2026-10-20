@@ -4,7 +4,8 @@ import json
 import pytest
 from speechmatics.rt import AudioEncoding, Model, ServerMessageType
 
-import meety_ai.recording.stt_client as stt_client_module
+import meety_ai.stt.speechmatics as stt_client_module
+from meety_ai.stt.schemas import STTTranscript
 
 
 # 테스트 이름: test_finish_waits_for_final_transcript
@@ -12,13 +13,36 @@ import meety_ai.recording.stt_client as stt_client_module
 # 준비: start_session·send_audio·stop_session·close 호출을 기록하는 가짜 AsyncClient를
 # monkeypatch하고, stop_session 중 마지막 확정 전사 콜백을 실행하게 한다.
 # 실행: start() → send_audio() → finish() 순서로 호출한다.
-# 기대 결과: 마지막 AddTranscript가 on_transcript에 전달된 뒤 finish()가 반환된다.
+# 기대 결과: 문장부호를 붙인 문장과 종료 시 남은 문장이 STTTranscript로 전달된 뒤 반환된다.
 # 실패 조건: finish()가 마지막 전사 처리 전에 반환하거나 전사가 누락된다.
 # 핵심 API: monkeypatch, 가짜 AsyncClient.on·start_session·send_audio·stop_session.
 async def test_finish_waits_for_final_transcript(monkeypatch):
     instances = []
     events = []
-    transcript = {"message": "AddTranscript", "metadata": {"transcript": "안녕하세요."}}
+    transcripts = []
+    transcript = {
+        "message": "AddTranscript",
+        "results": [
+            {
+                "type": "word",
+                "start_time": 0.1,
+                "end_time": 0.4,
+                "alternatives": [{"content": "안녕하세요", "speaker": "S1"}],
+            },
+            {
+                "type": "punctuation",
+                "start_time": 0.4,
+                "end_time": 0.4,
+                "alternatives": [{"content": ".", "speaker": "S1"}],
+            },
+            {
+                "type": "word",
+                "start_time": 0.5,
+                "end_time": 0.8,
+                "alternatives": [{"content": "마지막", "speaker": "S1"}],
+            },
+        ],
+    }
 
     class FakeAsyncClient:
         def __init__(self, *, api_key):
@@ -55,7 +79,7 @@ async def test_finish_waits_for_final_transcript(monkeypatch):
 
     def on_transcript(message):
         events.append("transcript")
-        assert message == transcript
+        transcripts.append(message)
 
     client = stt_client_module.SpeechmaticsClient("test-api-key", on_transcript)
     try:
@@ -78,7 +102,11 @@ async def test_finish_waits_for_final_transcript(monkeypatch):
     assert audio_format.encoding is AudioEncoding.PCM_S16LE
     assert audio_format.sample_rate == 16000
     assert fake_client.audio == [b"pcm"]
-    assert events == ["transcript", "stop_session_returned", "finish_returned"]
+    assert transcripts == [
+        STTTranscript(content="안녕하세요.", started_at_ms=100, ended_at_ms=400),
+        STTTranscript(content="마지막", started_at_ms=500, ended_at_ms=800),
+    ]
+    assert events == ["transcript", "transcript", "stop_session_returned", "finish_returned"]
     assert fake_client.closed
 
 
