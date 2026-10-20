@@ -4,6 +4,8 @@
 
 Accepted
 
+압축 스트림마다 디코더를 교체하는 부분은 [ADR-0011](0011-frontend-pcm-live-audio.md)로 대체한다. AI·STT 세션 수명에 대한 결정은 유지하며, 서버 교체 시 세션 복구는 별도로 다룬다.
+
 ---
 
 ## Context

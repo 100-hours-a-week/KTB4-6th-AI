@@ -20,8 +20,6 @@ jobs:
     steps:
       - name: 소스 코드 체크아웃
         uses: actions/checkout@v4
-      - name: ffmpeg 설치
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: uv 설정
         uses: astral-sh/setup-uv@v3
         with:

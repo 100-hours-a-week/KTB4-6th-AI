@@ -4,16 +4,10 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from enum import StrEnum
 
-import structlog
-
 from meety_ai.core.schemas import MeetingId, RecordingSessionId
-from meety_ai.recording.decoder import AudioDecodeError, AudioDecoder
 from meety_ai.recording.schemas import (
     AudioMeta,
     ClientEvent,
-    DecoderReady,
-    DecoderReadyPayload,
-    DecoderReset,
     Message,
     SessionEnded,
     SessionEndedPayload,
@@ -29,19 +23,8 @@ from meety_ai.recording.schemas import (
     SessionStop,
 )
 
-logger = structlog.stdlib.get_logger(__name__)
-
 MAX_AUDIO_CHUNK_SIZE = 256 * 1024
-DECODER_FEED_TIMEOUT = 10
-DECODER_FINISH_TIMEOUT = 10
-# 스트림 헤더 판별에 필요한 앞부분 길이. Chrome webm은 첫 청크가 1바이트라 여러 청크를 모은다.
-STREAM_HEAD_SIZE = 8
-
-
-def _starts_with_header(audio_format: str, head: bytes) -> bool:
-    if audio_format == "webm_opus":
-        return head.startswith(b"\x1a\x45\xdf\xa3")  # EBML magic
-    return head[4:8] == b"ftyp"  # MP4 첫 box
+STT_SEND_TIMEOUT = 10
 
 
 class SessionState(StrEnum):
@@ -64,20 +47,12 @@ class RecordingSession:
         self._state = SessionState.NEW
         self._meeting_id: MeetingId | None = None
         self._recording_session_id: RecordingSessionId | None = None
-        self._audio_format: str | None = None
 
         self._last_sequence: int | None = None
         self._pending_sequence: int | None = None
         self._pcm_bytes = 0
 
         self._on_pcm = on_pcm
-        # 녹음 스트림마다 decoder.reset으로 교체하며, 첫 reset 전에는 없다.
-        self._decoder: AudioDecoder | None = None
-        self._stream_head = b""
-
-    async def _consume_pcm(self, chunk: bytes) -> None:
-        await self._on_pcm(chunk)
-        self._pcm_bytes += len(chunk)
 
     async def _start(self, event: SessionStart) -> SessionReady:
         if self._state is not SessionState.NEW:
@@ -99,57 +74,9 @@ class RecordingSession:
             ),
         )
 
-    async def _finish_decoder(self) -> None:
-        """현재 스트림에 남은 음성을 STT로 비운다."""
-        # 입력이 없는 디코더는 비울 PCM이 없고 finish()가 실패로 판정한다.
-        if self._decoder is None or not self._stream_head:
-            return
-        try:
-            async with asyncio.timeout(DECODER_FINISH_TIMEOUT):
-                await self._decoder.finish()
-        except TimeoutError as error:
-            raise SessionProtocolError(
-                "processing_timeout", "디코더 종료 시간이 초과됐습니다."
-            ) from error
-
-    async def _reset(self, event: DecoderReset) -> DecoderReady:
-        if self._state is not SessionState.READY:
-            raise SessionProtocolError(
-                "invalid_state", "세션이 준비된 상태에서만 디코더를 교체할 수 있습니다."
-            )
-
-        if self._decoder is not None:
-            # STT 세션은 유지되므로 이전 스트림 정리 실패로 녹음을 끊지 않는다.
-            try:
-                await self._finish_decoder()
-            except (SessionProtocolError, AudioDecodeError) as error:
-                logger.warning("decoder_finish_failed", error_type=type(error).__name__)
-            await self._decoder.close()
-            self._decoder = None
-
-        decoder = AudioDecoder(self._consume_pcm)
-        try:
-            await decoder.start()
-        except OSError as error:
-            await decoder.close()
-            raise AudioDecodeError("디코더를 시작하지 못했습니다.") from error
-        self._decoder = decoder
-        self._audio_format = event.payload.audio_format
-        self._stream_head = b""
-
-        return DecoderReady(
-            type="decoder.ready",
-            request_id=event.request_id,
-            payload=DecoderReadyPayload(status="READY", input_audio_format=self._audio_format),
-        )
-
     def _accept_meta(self, event: AudioMeta) -> None:
         if self._state is not SessionState.READY:
             raise SessionProtocolError("invalid_state", "세션이 준비되지 않았습니다.")
-        if self._decoder is None:
-            raise SessionProtocolError(
-                "invalid_state", "decoder.reset 전에는 오디오를 받을 수 없습니다."
-            )
 
         expected_sequence = 0 if self._last_sequence is None else self._last_sequence + 1
         if event.payload.sequence != expected_sequence:
@@ -187,10 +114,7 @@ class RecordingSession:
         if self._state not in (SessionState.READY, SessionState.PAUSED):
             raise SessionProtocolError("invalid_state", "종료할 수 없는 세션 상태입니다.")
 
-        try:
-            await self._finish_decoder()
-        finally:
-            await self.close()
+        await self.close()
 
         return SessionEnded(
             type="session.ended",
@@ -215,8 +139,6 @@ class RecordingSession:
             )
         if isinstance(event, SessionStart):
             return await self._start(event)
-        if isinstance(event, DecoderReset):
-            return await self._reset(event)
         if isinstance(event, AudioMeta):
             return self._accept_meta(event)
         if isinstance(event, SessionPause):
@@ -238,27 +160,20 @@ class RecordingSession:
         if len(chunk) > MAX_AUDIO_CHUNK_SIZE:
             raise SessionProtocolError("message_too_large", "오디오 청크가 너무 큽니다.")
 
-        if len(self._stream_head) < STREAM_HEAD_SIZE:
-            self._stream_head += chunk[: STREAM_HEAD_SIZE - len(self._stream_head)]
-            if len(self._stream_head) == STREAM_HEAD_SIZE and not _starts_with_header(
-                self._audio_format, self._stream_head
-            ):
-                raise SessionProtocolError(
-                    "invalid_message", "스트림이 audioFormat의 헤더로 시작하지 않습니다."
-                )
+        if len(chunk) % 2:
+            raise SessionProtocolError("invalid_message", "PCM 청크는 16비트 샘플 단위여야 합니다.")
 
         try:
-            async with asyncio.timeout(DECODER_FEED_TIMEOUT):
-                await self._decoder.feed(chunk)
+            async with asyncio.timeout(STT_SEND_TIMEOUT):
+                await self._on_pcm(chunk)
         except TimeoutError as error:
             raise SessionProtocolError(
-                "processing_timeout", "디코더 입력 시간이 초과됐습니다."
+                "processing_timeout", "STT 오디오 전송 시간이 초과됐습니다."
             ) from error
 
+        self._pcm_bytes += len(chunk)
         self._last_sequence = self._pending_sequence
         self._pending_sequence = None
 
     async def close(self) -> None:
-        if self._decoder is not None:
-            await self._decoder.close()
         self._state = SessionState.ENDED

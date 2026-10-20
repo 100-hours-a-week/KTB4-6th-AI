@@ -7,8 +7,6 @@ from pydantic import Field, TypeAdapter
 
 from meety_ai.core.schemas import Identifier, MeetingId, Message, NonNegativeInt, RecordingSessionId
 
-AudioFormat = Literal["webm_opus", "mp4_aac"]
-
 
 class SessionParticipant(Message):
     team_member_id: NonNegativeInt | None
@@ -38,27 +36,6 @@ class SessionReady(Message):
     meeting_id: MeetingId
     recording_session_id: RecordingSessionId
     payload: SessionReadyPayload
-
-
-class DecoderResetPayload(Message):
-    audio_format: AudioFormat
-
-
-class DecoderReset(Message):
-    type: Literal["decoder.reset"]
-    request_id: Identifier
-    payload: DecoderResetPayload
-
-
-class DecoderReadyPayload(Message):
-    status: Literal["READY"]
-    input_audio_format: AudioFormat
-
-
-class DecoderReady(Message):
-    type: Literal["decoder.ready"]
-    request_id: Identifier
-    payload: DecoderReadyPayload
 
 
 class TranscriptCommittedPayload(Message):
@@ -142,7 +119,6 @@ class SessionErrorPayload(Message):
         "unexpected_binary",
         "expected_binary",
         "message_too_large",
-        "audio_decode_failed",
         "provider_unavailable",
         "processing_timeout",
     ]
@@ -157,7 +133,7 @@ class SessionError(Message):
 
 
 ClientEvent = Annotated[
-    SessionStart | DecoderReset | AudioMeta | SessionPause | SessionResume | SessionStop,
+    SessionStart | AudioMeta | SessionPause | SessionResume | SessionStop,
     Field(discriminator="type"),
 ]
 
