@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from starlette.testclient import WebSocketDenialResponse
 from starlette.websockets import WebSocketDisconnect
 
-import meety_ai.recording.router as router_module
+import meety_ai.recording.connection as connection_module
 from meety_ai.live import create_live_app
 from meety_ai.stt.schemas import STTTranscript
 
@@ -404,20 +404,20 @@ def test_committed_transcript_arrives_before_stop(fake_speechmatics_client):
 
 
 # #18: 입력 대기 중 STT 연결 단절
-# 테스트 이름: test_provider_disconnect_before_next_audio
-# 목적: 공급자 단절 후 들어온 다음 오디오가 처리되지 않도록 한다.
+# 테스트 이름: test_provider_disconnect_while_waiting_for_input
+# 목적: 입력 대기 중에도 공급자 단절을 감지하고 연결과 작업을 정리한다.
 # 준비: 기존 fake_speechmatics_client를 재사용한다.
 # 준비: 공급자 대역에 연결 단절을 발생시키는 동작을 추가한다. 호출자에게 즉시 raise하는
 # 준비: 방식이 아니라, 실제 클라이언트와 같은 오류 전달 경로로 라우터에 단절을 알린다.
 # 준비: on_error 콜백으로 공급자 단절을 알리고, 라우터가 이 콜백을 연결했는지 확인한다.
 # 실행: start → ready를 받은 뒤 공급자 연결 단절을 발생시킨다.
-# 실행: 수신 루프를 깨우기 위해 다음 audio.meta를 보내고 error 이벤트와 종료를 기다린다.
-# 기대 결과: error.payload.code는 provider_unavailable, retryable은 true이다.
+# 실행: 추가 입력 없이 error 이벤트와 종료를 기다린다.
+# 기대 결과: 추가 입력 없이 error.payload.code는 provider_unavailable, retryable은 true이다.
 # 기대 결과: 특정 Backend 요청의 실패가 아니므로 requestId는 생략한다.
 # 기대 결과: session.ended 없이 WebSocketDisconnect.code=1011로 연결이 종료된다.
 # 기대 결과: 세션 처리 종료 후 공급자가 닫히고 recording_connections가 0이다.
 # 기대 결과: 세션 핸들러와 전사 전송 작업이 종료된다. SDK 내부 작업 정리는 별도 검증한다.
-# 실패 조건: audio.meta가 세션에 반영되거나 다른 원인의 오류로 종료되거나,
+# 실패 조건: 다음 입력까지 종료가 보류되거나 다른 원인의 오류로 종료되거나,
 # 실패 조건: 정상 종료 이벤트를 보내거나 연결·작업·연결 수가 정리되지 않으면 실패한다.
 # 주의: 임의의 sleep 대신 준비 완료 응답과 종료 신호를 기준으로 검사한다.
 # 주의: TestClient.receive_json에는 자체 timeout이 없으므로 테스트 프로세스에 10초
@@ -425,12 +425,11 @@ def test_committed_transcript_arrives_before_stop(fake_speechmatics_client):
 # 정리: 성공·실패 모두 WebSocket과 TestClient를 닫는다. 작업 확인은 해당 세션 대상으로
 # 정리: 한정하고 TestClient 자체 작업까지 모두 종료됐다고 검사하지 않는다.
 # 핵심 API: TestClient.websocket_connect, receive_json, pytest.raises(WebSocketDisconnect).
-# 다음 한 단계: SpeechmaticsClient에 on_error 경로를 만들고 라우터의 입력 대기와 연결한다.
-def test_provider_disconnect_before_next_audio(fake_speechmatics_client, monkeypatch):
+def test_provider_disconnect_while_waiting_for_input(fake_speechmatics_client, monkeypatch):
     app = create_live_app()
     session_finished = Event()
     sender_tasks = []
-    original_sender = router_module.send_transcripts
+    original_sender = connection_module.send_transcripts
 
     async def tracked_sender(*args, **kwargs):
         sender_tasks.append(asyncio.current_task())
@@ -443,7 +442,7 @@ def test_provider_disconnect_before_next_audio(fake_speechmatics_client, monkeyp
             if scope["type"] == "websocket":
                 session_finished.set()
 
-    monkeypatch.setattr(router_module, "send_transcripts", tracked_sender)
+    monkeypatch.setattr(connection_module, "send_transcripts", tracked_sender)
 
     with TestClient(observed_app) as client:
         with client.websocket_connect(WEBSOCKET_URL) as ws:
@@ -455,11 +454,8 @@ def test_provider_disconnect_before_next_audio(fake_speechmatics_client, monkeyp
             assert app.state.recording_connections == 1
             assert callable(provider.on_error), "라우터가 STT 오류 콜백을 연결해야 합니다."
 
-            # 공급자 오류를 저장한 뒤 다음 입력으로 수신 대기를 깨운다.
             client.portal.call(provider.emit_disconnect)
-            ws.send_json(meta_message)
 
-            # 다음 입력은 수신 대기만 깨우며 세션에서 처리되면 안 된다.
             assert session_finished.wait(3), "공급자 단절 후 세션이 종료되지 않았습니다."
             response = ws.receive_json()
             assert response["type"] == "error"
@@ -475,6 +471,58 @@ def test_provider_disconnect_before_next_audio(fake_speechmatics_client, monkeyp
             assert provider.fed == []
             assert app.state.recording_connections == 0
             assert sender_tasks and all(task.done() for task in sender_tasks)
+
+
+# 테스트 이름: test_provider_disconnect_during_start
+# 목적: STT 시작을 기다리는 중에도 공급자 오류가 즉시 전달되도록 한다.
+# 준비: 공급자 start를 보류하고 종료·취소 여부를 신호로 관찰한다.
+# 실행: start 처리 진입 후 공급자 오류를 발생시키고 추가 입력 없이 종료를 기다린다.
+# 기대 결과: 시작 대기가 취소되고 provider_unavailable → close 1011 이후 자원이 정리된다.
+# 실패 조건: 시작 완료나 다음 입력까지 오류 전달이 보류되거나 자원이 남으면 실패한다.
+def test_provider_disconnect_during_start(fake_speechmatics_client):
+    app = create_live_app()
+    starting = Event()
+    start_cancelled = Event()
+    session_finished = Event()
+
+    async def observed_app(scope, receive, send):
+        try:
+            await app(scope, receive, send)
+        finally:
+            if scope["type"] == "websocket":
+                session_finished.set()
+
+    with TestClient(observed_app) as client:
+        with client.websocket_connect(WEBSOCKET_URL) as ws:
+            provider = fake_speechmatics_client[0]
+
+            async def waiting_start():
+                provider.closed = False
+                starting.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    start_cancelled.set()
+
+            provider.start = waiting_start
+            ws.send_json(start_message)
+            assert starting.wait(3), "STT 시작 처리에 진입하지 않았습니다."
+
+            client.portal.call(provider.emit_disconnect)
+
+            assert session_finished.wait(3), "STT 시작 대기 중 공급자 오류가 전달되지 않았습니다."
+            response = ws.receive_json()
+            assert response["type"] == "error"
+            assert response["payload"]["code"] == "provider_unavailable"
+            assert response["payload"]["retryable"] is True
+            assert "requestId" not in response
+            with pytest.raises(WebSocketDisconnect) as error:
+                ws.receive_json()
+            assert error.value.code == 1011
+            assert start_cancelled.is_set()
+            assert provider.closed
+            assert not provider.finished
+            assert app.state.recording_connections == 0
 
 
 # 테스트 이름: test_final_transcript_precedes_session_ended
@@ -526,7 +574,7 @@ def test_final_transcript_precedes_session_ended(fake_speechmatics_client):
 # 실패 조건: session.ended가 오거나 세션이 계속 대기하면 실패한다.
 def test_stop_timeout_cleans_up_session(fake_speechmatics_client, monkeypatch):
     app = create_live_app()
-    monkeypatch.setattr(router_module, "STT_STOP_TIMEOUT", 0.01)
+    monkeypatch.setattr(connection_module, "STT_STOP_TIMEOUT", 0.01)
 
     with TestClient(app) as client:
         with client.websocket_connect(WEBSOCKET_URL) as ws:
@@ -555,31 +603,39 @@ def test_stop_timeout_cleans_up_session(fake_speechmatics_client, monkeypatch):
 
 
 # 테스트 이름: test_transcript_send_failure_stops_receiving
-# 목적: 전송 작업의 실패 후 들어온 다음 오디오가 처리되지 않도록 한다.
+# 목적: 입력 대기 중에도 전사 전송 실패를 감지하고 자원을 정리한다.
 # 준비: 전사 전송 경계에서 TimeoutError를 발생시킨다.
-# 실행: start → ready → 전송 실패 확인 → 다음 audio.meta를 보낸다.
+# 실행: start → ready → 전송 실패 확인 후 추가 입력 없이 오류 응답을 기다린다.
 # 기대 결과: 공급자·세션 작업이 정리되고 연결 수가 0이다.
-# 실패 조건: 다음 audio.meta가 처리되거나 클라이언트 연결 해제까지 정리가 보류되면 실패한다.
+# 기대 결과: 정리 중 추가로 발생한 공급자 오류는 Sentry에 별도 보고하지 않는다.
+# 실패 조건: 다음 입력이나 클라이언트 연결 해제까지 정리가 보류되면 실패한다.
 # 핵심 API: 기존 observed_app·Event 종료 관찰 방식, client.portal.call, monkeypatch.
-# 다음 한 단계: 마지막 전사와 session.ended의 수신 순서를 검증하는 첫 사례부터 구현한다.
 # 주의: 모든 사례는 프로세스 실행 기한을 두고 성공·실패 모두 TestClient를 닫는다.
 def test_transcript_send_failure_stops_receiving(fake_speechmatics_client, monkeypatch):
     app = create_live_app()
     sender_failed = Event()
+    reported_errors = []
 
     async def failing_sender(*args, **kwargs):
         sender_failed.set()
         raise TimeoutError
 
-    monkeypatch.setattr(router_module, "send_transcripts", failing_sender)
+    monkeypatch.setattr(connection_module, "send_transcripts", failing_sender)
+    monkeypatch.setattr(connection_module.sentry_sdk, "capture_exception", reported_errors.append)
 
     with TestClient(app) as client:
         with client.websocket_connect(WEBSOCKET_URL) as ws:
+            provider = fake_speechmatics_client[0]
+
+            async def close_with_provider_error():
+                provider.emit_disconnect()
+                provider.closed = True
+
+            provider.close = close_with_provider_error
             ws.send_json(start_message)
             assert ws.receive_json()["type"] == "session.ready"
             assert sender_failed.wait(1), "전사 전송 작업이 시작되지 않았습니다."
 
-            ws.send_json(meta_message)
             response = ws.receive_json()
             assert response["type"] == "error"
             assert response["payload"]["code"] == "processing_timeout"
@@ -593,6 +649,7 @@ def test_transcript_send_failure_stops_receiving(fake_speechmatics_client, monke
         assert provider.closed
         assert fake_speechmatics_client[0].fed == []
         assert app.state.recording_connections == 0
+        assert reported_errors == []
 
 
 # 테스트 이름: test_audio_ack_heartbeat_and_reconnection
