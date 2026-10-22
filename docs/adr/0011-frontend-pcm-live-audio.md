@@ -76,7 +76,7 @@ FE: 음성 수집·PCM 생성 → BE: PCM 중계 → AI: PCM 수신 → STT
 
 - 전송 규격은 16 kHz·mono·signed 16-bit little-endian raw PCM이며, 각 청크는 2바이트 샘플 경계를 지킨다. 기존 [STT 입력 규격](../../src/meety_ai/recording/stt_client.py)과 맞춘다.
 - AI는 `session.ready` 이후 `audio.meta`와 PCM binary를 받고, [RecordingSession](../../src/meety_ai/recording/session.py)에서 검증한 바이트를 STT로 직접 전달한다. `decoder.reset / decoder.ready`는 제거한다.
-- PCM 전환으로 제거하는 것은 압축 스트림의 헤더·디코더 상태 의존성이다. 순번·ACK·중복 제거·마지막 청크 확인과 STT 세션·전사 시간축 복구는 #102의 별도 작업으로 남는다.
+- PCM 전환으로 제거하는 것은 압축 스트림의 헤더·디코더 상태 의존성이다. 순번·ACK·중복 제거·마지막 청크 확인과 STT 세션·전사 시간축 복구는 별도 작업으로 남는다.
 - FE의 원본 영속 보관·최종 파일 변환·업로드 책임은 유지한다. 저장 형식과 변환 세부 구현은 FE에서 확인하며, 사후 화자 분리용 Modal의 파일 변환은 이 결정의 대상이 아니다.
 
 ---
