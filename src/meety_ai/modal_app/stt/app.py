@@ -1,4 +1,7 @@
-"""Nemotron과 Qwen을 같은 A10에 올려 인증된 WebSocket으로 제공한다."""
+"""Nemotron·Qwen의 GPU 상태를 복원해 인증된 WebSocket으로 제공한다."""
+
+import os
+import uuid
 
 import modal
 
@@ -41,16 +44,29 @@ image = (
     startup_timeout=900,
     scaledown_window=60,
     volumes={"/cache": cache},
+    enable_memory_snapshot=True,
+    experimental_options={"enable_gpu_snapshot": True},
 )
 @modal.concurrent(max_inputs=1)
 class TranscriptionWorker:
-    @modal.enter()
+    @modal.enter(snap=True)
     def load(self):
+        import torch
+
         from meety_ai.modal_app.stt.pipeline import InferenceRuntime
 
         self.runtime = InferenceRuntime()
-        self.runtime.start_runtime()
+        self.runtime.metadata["modelLoadId"] = self.runtime.metadata["bootId"]
+        # 단일 GPU의 NCCL 감시 스레드가 복원 뒤 이전 TCPStore를 참조하지 않게 한다.
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
         cache.commit()
+
+    @modal.enter(snap=False)
+    def restore(self):
+        self.runtime.start_runtime()
+        self.runtime.metadata["bootId"] = uuid.uuid4().hex
+        self.runtime.metadata["containerId"] = os.environ.get("MODAL_TASK_ID")
 
     @modal.asgi_app(requires_proxy_auth=True)
     def web(self):
