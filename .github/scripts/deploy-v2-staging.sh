@@ -52,7 +52,9 @@ umask 077
     echo "LANGSMITH_TRACING=true"
   else
     # 목업 앱은 공급자를 부르지 않지만 설정 검증을 위해 값이 있어야 한다
-    echo "SPEECHMATICS_API_KEY=fake"
+    echo "MEETY_MODAL_STT_URL=wss://fake.modal.run/transcribe"
+    echo "MODAL_PROXY_TOKEN_ID=fake"
+    echo "MODAL_PROXY_TOKEN_SECRET=fake"
     echo "OPENROUTER_API_KEY=fake"
     echo "MODAL_TOKEN_ID=fake"
     echo "MODAL_TOKEN_SECRET=fake"
@@ -63,9 +65,14 @@ umask 077
 } > "$ENV_FILE.new"
 umask 022
 if [ "$MODE" = real ]; then
-  for key in SPEECHMATICS_API_KEY OPENROUTER_API_KEY MODAL_TOKEN_ID MODAL_TOKEN_SECRET; do
+  for key in OPENROUTER_API_KEY MODAL_TOKEN_ID MODAL_TOKEN_SECRET; do
     grep -q "^$key=." "$ENV_FILE.new" || { echo "Parameter Store에 $key가 없다 ($PARAM_PREFIX/ai)"; rm -f "$ENV_FILE.new"; exit 1; }
   done
+  if has_role live; then
+    for key in MEETY_MODAL_STT_URL MODAL_PROXY_TOKEN_ID MODAL_PROXY_TOKEN_SECRET; do
+      grep -q "^$key=." "$ENV_FILE.new" || { echo "Parameter Store에 $key가 없다 ($PARAM_PREFIX/ai)"; rm -f "$ENV_FILE.new"; exit 1; }
+    done
+  fi
   LIVE_APP=meety_ai.live:create_live_app
   ANALYSIS_APP=meety_ai.analysis:create_analysis_app
 else
