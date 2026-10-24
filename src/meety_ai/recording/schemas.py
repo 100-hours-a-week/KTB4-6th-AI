@@ -25,6 +25,9 @@ class SessionStart(Message):
         default=0, description="0부터 세는 녹음 전체 오디오 순번"
     )
     transcript_sequence_start: NonNegativeInt = Field(default=0, description="첫 전사에 붙일 순번")
+    title: str = Field(default="", max_length=900)
+    purpose: str = Field(default="", max_length=900)
+    notes: str = Field(default="", max_length=900)
 
 
 class SessionReadyPayload(Message):

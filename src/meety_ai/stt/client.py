@@ -10,7 +10,9 @@ class STTProviderError(Exception):
 class STTClient(Protocol):
     """구현 클래스는 연결 설정과 STTTranscript를 전달할 콜백을 받는다."""
 
-    async def start(self) -> None:
+    async def start(
+        self, *, meeting_id: int = 0, recording_session_id: int = 0, context: str = ""
+    ) -> None:
         """오디오를 전송할 수 있도록 전사 세션을 시작한다."""
         ...
 

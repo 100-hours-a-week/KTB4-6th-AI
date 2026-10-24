@@ -49,7 +49,10 @@ class LiveSettings(Settings):
     """실시간 서비스에 필요한 설정."""
 
     max_recording_connections: int = Field(default=20, gt=0)
-    speechmatics_api_key: SecretStr = Field(validation_alias="SPEECHMATICS_API_KEY")
+    modal_stt_url: str = Field(pattern=r"^wss://[^\s]+$")
+    modal_proxy_token_id: SecretStr = Field(validation_alias="MODAL_PROXY_TOKEN_ID")
+    modal_proxy_token_secret: SecretStr = Field(validation_alias="MODAL_PROXY_TOKEN_SECRET")
+    modal_stt_start_timeout_seconds: float = Field(default=240, gt=0)
 
 
 class AnalysisSettings(Settings):

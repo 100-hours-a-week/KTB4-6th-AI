@@ -12,8 +12,16 @@ def fake_speechmatics_client(monkeypatch):
     )
 
     class FakeSpeechmaticsClient:
-        def __init__(self, api_key, on_transcript, on_error=None):
-            self.api_key = api_key
+        def __init__(
+            self,
+            url,
+            proxy_token_id,
+            proxy_token_secret,
+            on_transcript,
+            on_error=None,
+            start_timeout_seconds=240,
+        ):
+            self.proxy_token_id = proxy_token_id
             self.on_transcript = on_transcript
             self.on_error = on_error
             self.fed = []
@@ -21,7 +29,7 @@ def fake_speechmatics_client(monkeypatch):
             self.finished = False
             instances.append(self)
 
-        async def start(self):
+        async def start(self, **kwargs):
             self.closed = False
 
         async def send_audio(self, chunk):
@@ -40,9 +48,12 @@ def fake_speechmatics_client(monkeypatch):
             self.closed = True
 
     monkeypatch.setenv("SPEECHMATICS_API_KEY", "test-api-key")
+    monkeypatch.setenv("MEETY_MODAL_STT_URL", "wss://test.modal.run/transcribe")
+    monkeypatch.setenv("MODAL_PROXY_TOKEN_ID", "test-proxy-id")
+    monkeypatch.setenv("MODAL_PROXY_TOKEN_SECRET", "test-proxy-secret")
     monkeypatch.setattr(
         live_module,
-        "SpeechmaticsClient",
+        "ModalSTTClient",
         FakeSpeechmaticsClient,
         raising=False,
     )

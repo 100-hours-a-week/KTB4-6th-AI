@@ -58,6 +58,7 @@ class RecordingConnection:
         self._binary_deadline: float | None = None
         self._close_reason: str | None = None
         self._audio_bytes = 0
+        self._resumed = False
         self._started = time.perf_counter()
 
     async def run(self) -> None:
@@ -141,7 +142,21 @@ class RecordingConnection:
             recording_session_id=event.recording_session_id,
         )
         logger.info("session_started")
-        await self._stt_client.start()
+        self._resumed = event.start_sequence > 0 or event.transcript_sequence_start > 0
+        context = "\n".join(
+            f"{label}: {value}"
+            for label, value in (
+                ("회의 제목", event.title),
+                ("목적", event.purpose),
+                ("비고", event.notes),
+            )
+            if value
+        )
+        await self._stt_client.start(
+            meeting_id=event.meeting_id,
+            recording_session_id=event.recording_session_id,
+            context=context,
+        )
         self._sender_task = asyncio.create_task(self._forward_transcripts(event))
         self._audio_task = asyncio.create_task(self._forward_audio())
 
@@ -244,6 +259,9 @@ class RecordingConnection:
             self._on_error(error)
 
     def _on_transcript(self, message: STTTranscript) -> None:
+        if self._resumed:
+            # shortcut: cache 복구 전에는 재연결 후 화자를 null로 전달한다.
+            message = message.model_copy(update={"speaker_id": None})
         self._transcript_queue.put_nowait(message)
 
     def _on_provider_error(self, error: Exception) -> None:

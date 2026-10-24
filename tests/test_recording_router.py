@@ -60,13 +60,13 @@ def test_recording_connection_limit_from_environment(monkeypatch, fake_speechmat
 
 
 def test_missing_provider_key_prevents_live_app_start(monkeypatch, tmp_path):
-    monkeypatch.delenv("SPEECHMATICS_API_KEY")
+    monkeypatch.delenv("MODAL_PROXY_TOKEN_SECRET")
     monkeypatch.chdir(tmp_path)
 
     with pytest.raises(ValidationError) as error:
         create_live_app()
 
-    assert error.value.errors(include_input=False)[0]["loc"] == ("SPEECHMATICS_API_KEY",)
+    assert error.value.errors(include_input=False)[0]["loc"] == ("MODAL_PROXY_TOKEN_SECRET",)
 
 
 def test_recording_flow(fake_speechmatics_client):
@@ -397,7 +397,7 @@ def test_committed_transcript_arrives_before_stop(fake_speechmatics_client):
             assert recognized_at.utcoffset() == timedelta(0)
 
         stt_client = fake_speechmatics_client[0]
-        assert stt_client.api_key == "test-api-key"
+        assert stt_client.proxy_token_id == "test-proxy-id"
         assert stt_client.fed == [b"\x01\x00" * 8000]
         assert not stt_client.finished
         assert stt_client.closed
@@ -496,7 +496,7 @@ def test_provider_disconnect_during_start(fake_speechmatics_client):
         with client.websocket_connect(WEBSOCKET_URL) as ws:
             provider = fake_speechmatics_client[0]
 
-            async def waiting_start():
+            async def waiting_start(**kwargs):
                 provider.closed = False
                 starting.set()
                 try:
