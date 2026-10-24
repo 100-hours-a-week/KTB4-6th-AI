@@ -208,7 +208,10 @@ async def verify(remote_url: str, audio: Path, output: Path, durations: list[int
                 pause=seconds == 35,
                 resumed=seconds == 300,
             )
-            assert live.state.recording_connections == 0
+            # WebSocket 종료 응답 뒤에도 공급자 연결 정리가 잠시 이어질 수 있다.
+            async with asyncio.timeout(10):
+                while live.state.recording_connections:
+                    await asyncio.sleep(0.01)
     finally:
         adapter_module.connect = original_connect
         remote_events.close()
