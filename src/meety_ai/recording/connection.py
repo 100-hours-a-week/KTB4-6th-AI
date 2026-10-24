@@ -28,7 +28,7 @@ from meety_ai.stt.schemas import STTTranscript
 
 logger = structlog.stdlib.get_logger(__name__)
 
-MAX_TEXT_SIZE = 4 * 1024
+MAX_TEXT_SIZE = 16 * 1024
 BINARY_WAIT_TIMEOUT = 10
 STT_STOP_TIMEOUT = 30
 STT_SEND_TIMEOUT = 10

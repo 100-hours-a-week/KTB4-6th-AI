@@ -69,6 +69,27 @@ def test_missing_provider_key_prevents_live_app_start(monkeypatch, tmp_path):
     assert error.value.errors(include_input=False)[0]["loc"] == ("MODAL_PROXY_TOKEN_SECRET",)
 
 
+# 테스트 이름: test_session_start_accepts_korean_meeting_context
+# 목적: 허용 길이의 한글 회의 문맥이 기존 4KB 제한으로 거부되는 회귀를 막는다.
+# 준비: 제목·목적·비고가 각각 900자인 시작 메시지와 기존 공급자 대역.
+# 실행: 실제 WebSocket으로 시작 메시지를 보내고 정상 종료한다.
+# 기대 결과: session.ready와 session.ended를 받고 공급자와 연결이 정리된다.
+# 실패 조건: 스키마가 허용한 문맥 때문에 녹음을 시작하지 못한다.
+def test_session_start_accepts_korean_meeting_context(fake_speechmatics_client):
+    app = create_live_app()
+    with TestClient(app) as client:
+        with client.websocket_connect(WEBSOCKET_URL) as ws:
+            ws.send_json(
+                {**start_message, "title": "가" * 900, "purpose": "나" * 900, "notes": "다" * 900}
+            )
+            assert ws.receive_json()["type"] == "session.ready"
+            ws.send_json(stop_message)
+            assert ws.receive_json()["type"] == "session.ended"
+        assert fake_speechmatics_client[0].finished
+        assert fake_speechmatics_client[0].closed
+        assert app.state.recording_connections == 0
+
+
 def test_recording_flow(fake_speechmatics_client):
     with TestClient(create_live_app()) as client:
         with client.websocket_connect(WEBSOCKET_URL) as ws:
