@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Thread
 from types import SimpleNamespace
 
+import pytest
 import uvicorn
 from fastapi.testclient import TestClient
 from websockets.asyncio.client import connect
@@ -223,5 +224,61 @@ async def test_short_turns_are_skipped_before_asr():
             runtime.calls.clear()
             await runtime.release(session)
     finally:
+        runtime.asr_task.cancel()
+        await asyncio.gather(runtime.asr_task, return_exceptions=True)
+
+
+# 테스트 이름: test_same_speaker_turns_merge_within_one_second
+# 목적: 정확히 1초 간격인 짧은 발화가 따로 닫혀 모두 생략되는 회귀를 막는다.
+# 준비: 300ms 발화 두 개 사이에 990·1000·1010ms 무음을 반환하는 모델 대역.
+# 실행: 실제 세션에 PCM을 공급하고 EOF까지 처리한다.
+# 기대 결과: 1초 이내 간격은 한 전사로 남고 1초 초과 시 두 초단구간은 생략된다.
+# 실패 조건: 1초 경계에서 전사가 사라지거나 1초 초과 간격까지 병합된다.
+@pytest.mark.parametrize("gap_frames", [99, 100, 101])
+async def test_same_speaker_turns_merge_within_one_second(gap_frames):
+    class Runtime(InferenceRuntime):
+        def __init__(self):
+            self.geometry = {
+                "first_samples": 16000,
+                "chunk_samples": 16000,
+                "frame_samples": 160,
+                "mel_step": 100,
+            }
+            self.start_runtime()
+
+        async def diarize(self, session, pcm, *, last):
+            return {
+                "active": [
+                    [int(frame < 30 or frame >= 30 + gap_frames), 0, 0, 0, 0, 0, 0, 0]
+                    for frame in range(session.frames, session.frames + len(pcm) // 320)
+                ],
+                "next_start": session.next_sample + len(pcm) // 2,
+            }
+
+        def _transcribe(self, jobs):
+            return [("이어 말한 발언", None) for job in jobs]
+
+        async def _call_worker(self, request):
+            return {"released": True}
+
+    runtime = Runtime()
+    session = runtime.open(
+        SessionStart(type="session.start", meeting_id=1, recording_session_id=1)
+    )
+    try:
+        await session.feed(bytes((60 + gap_frames) * 320))
+        await session.finish()
+        results = []
+        while (event := await session.results.get()) is not None:
+            results.append(event)
+        committed = [event for event in results if event["type"] == "segment.committed"]
+        assert len(committed) == int(gap_frames <= 100)
+        assert results[-1]["succeededSegments"] == len(committed)
+        if committed:
+            assert committed[0]["startedAtMs"] == 0
+            assert committed[0]["endedAtMs"] == (60 + gap_frames) * 10
+            assert committed[0]["content"] == "이어 말한 발언"
+    finally:
+        await runtime.release(session)
         runtime.asr_task.cancel()
         await asyncio.gather(runtime.asr_task, return_exceptions=True)

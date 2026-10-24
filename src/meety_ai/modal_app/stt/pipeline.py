@@ -151,7 +151,7 @@ class PipelineSession:
                         self.open_turns[speaker] = boundary
             elif speaker in self.open_turns:
                 self.pending_ends.setdefault(speaker, lower)
-                if upper - self.pending_ends[speaker] >= SAMPLE_RATE:
+                if upper - self.pending_ends[speaker] > SAMPLE_RATE:
                     await self._close_turn(speaker, self.pending_ends[speaker], "silence")
 
     def _trim(self) -> None:
