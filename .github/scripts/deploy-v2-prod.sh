@@ -54,9 +54,14 @@ umask 077
   echo "LANGSMITH_TRACING=true"
 } > "$ENV_FILE.new"
 umask 022
-for key in SPEECHMATICS_API_KEY OPENROUTER_API_KEY MODAL_TOKEN_ID MODAL_TOKEN_SECRET; do
+for key in OPENROUTER_API_KEY MODAL_TOKEN_ID MODAL_TOKEN_SECRET; do
   grep -q "^$key=." "$ENV_FILE.new" || { echo "Parameter Store에 $key가 없다 ($PARAM_PREFIX/ai)"; rm -f "$ENV_FILE.new"; exit 1; }
 done
+if has_role live; then
+  for key in MEETY_MODAL_STT_URL MODAL_PROXY_TOKEN_ID MODAL_PROXY_TOKEN_SECRET; do
+    grep -q "^$key=." "$ENV_FILE.new" || { echo "Parameter Store에 $key가 없다 ($PARAM_PREFIX/ai)"; rm -f "$ENV_FILE.new"; exit 1; }
+  done
+fi
 LIVE_APP=meety_ai.live:create_live_app
 ANALYSIS_APP=meety_ai.analysis:create_analysis_app
 mv "$ENV_FILE.new" "$ENV_FILE"

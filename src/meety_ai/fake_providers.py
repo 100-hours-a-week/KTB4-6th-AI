@@ -42,7 +42,9 @@ class FakeSpeechmaticsClient:
         self._emitted_seconds = 0
         self._pending: set[asyncio.Task[None]] = set()
 
-    async def start(self) -> None:
+    async def start(
+        self, *, meeting_id: int = 0, recording_session_id: int = 0, context: str = ""
+    ) -> None:
         await asyncio.sleep(self._latency)
 
     async def _emit_transcript(self, message: STTTranscript) -> None:

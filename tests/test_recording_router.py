@@ -60,13 +60,34 @@ def test_recording_connection_limit_from_environment(monkeypatch, fake_speechmat
 
 
 def test_missing_provider_key_prevents_live_app_start(monkeypatch, tmp_path):
-    monkeypatch.delenv("SPEECHMATICS_API_KEY")
+    monkeypatch.delenv("MODAL_PROXY_TOKEN_SECRET")
     monkeypatch.chdir(tmp_path)
 
     with pytest.raises(ValidationError) as error:
         create_live_app()
 
-    assert error.value.errors(include_input=False)[0]["loc"] == ("SPEECHMATICS_API_KEY",)
+    assert error.value.errors(include_input=False)[0]["loc"] == ("MODAL_PROXY_TOKEN_SECRET",)
+
+
+# 테스트 이름: test_session_start_accepts_korean_meeting_context
+# 목적: 허용 길이의 한글 회의 문맥이 기존 4KB 제한으로 거부되는 회귀를 막는다.
+# 준비: 제목·목적·비고가 각각 900자인 시작 메시지와 기존 공급자 대역.
+# 실행: 실제 WebSocket으로 시작 메시지를 보내고 정상 종료한다.
+# 기대 결과: session.ready와 session.ended를 받고 공급자와 연결이 정리된다.
+# 실패 조건: 스키마가 허용한 문맥 때문에 녹음을 시작하지 못한다.
+def test_session_start_accepts_korean_meeting_context(fake_speechmatics_client):
+    app = create_live_app()
+    with TestClient(app) as client:
+        with client.websocket_connect(WEBSOCKET_URL) as ws:
+            ws.send_json(
+                {**start_message, "title": "가" * 900, "purpose": "나" * 900, "notes": "다" * 900}
+            )
+            assert ws.receive_json()["type"] == "session.ready"
+            ws.send_json(stop_message)
+            assert ws.receive_json()["type"] == "session.ended"
+        assert fake_speechmatics_client[0].finished
+        assert fake_speechmatics_client[0].closed
+        assert app.state.recording_connections == 0
 
 
 def test_recording_flow(fake_speechmatics_client):
@@ -397,7 +418,7 @@ def test_committed_transcript_arrives_before_stop(fake_speechmatics_client):
             assert recognized_at.utcoffset() == timedelta(0)
 
         stt_client = fake_speechmatics_client[0]
-        assert stt_client.api_key == "test-api-key"
+        assert stt_client.proxy_token_id == "test-proxy-id"
         assert stt_client.fed == [b"\x01\x00" * 8000]
         assert not stt_client.finished
         assert stt_client.closed
@@ -476,8 +497,8 @@ def test_provider_disconnect_while_waiting_for_input(fake_speechmatics_client, m
 # 테스트 이름: test_provider_disconnect_during_start
 # 목적: STT 시작을 기다리는 중에도 공급자 오류가 즉시 전달되도록 한다.
 # 준비: 공급자 start를 보류하고 종료·취소 여부를 신호로 관찰한다.
-# 실행: start 처리 진입 후 공급자 오류를 발생시키고 추가 입력 없이 종료를 기다린다.
-# 기대 결과: 시작 대기가 취소되고 provider_unavailable → close 1011 이후 자원이 정리된다.
+# 실행: start/ready 이후 공급자 오류를 발생시키고 추가 입력 없이 종료를 기다린다.
+# 기대 결과: 기동 중에도 ready를 받고, 오류 시 시작 취소·provider_unavailable·자원 정리가 된다.
 # 실패 조건: 시작 완료나 다음 입력까지 오류 전달이 보류되거나 자원이 남으면 실패한다.
 def test_provider_disconnect_during_start(fake_speechmatics_client):
     app = create_live_app()
@@ -496,7 +517,7 @@ def test_provider_disconnect_during_start(fake_speechmatics_client):
         with client.websocket_connect(WEBSOCKET_URL) as ws:
             provider = fake_speechmatics_client[0]
 
-            async def waiting_start():
+            async def waiting_start(**kwargs):
                 provider.closed = False
                 starting.set()
                 try:
@@ -507,6 +528,7 @@ def test_provider_disconnect_during_start(fake_speechmatics_client):
             provider.start = waiting_start
             ws.send_json(start_message)
             assert starting.wait(3), "STT 시작 처리에 진입하지 않았습니다."
+            assert ws.receive_json()["type"] == "session.ready"
 
             client.portal.call(provider.emit_disconnect)
 

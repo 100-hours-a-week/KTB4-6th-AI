@@ -126,7 +126,9 @@ class SpeechmaticsClient:
         if not self._closing and not (self._finishing and self._end_received):
             self._report_error()
 
-    async def start(self) -> None:
+    async def start(
+        self, *, meeting_id: int = 0, recording_session_id: int = 0, context: str = ""
+    ) -> None:
         """한국어 Enhanced 실시간 전사 세션을 시작한다."""
         try:
             await self._client.start_session(
