@@ -20,11 +20,11 @@ from meety_ai.modal_app.stt.protocol import SessionStart
 
 
 # 테스트 이름: test_modal_transcript_before_stop_and_final_drain
-# 목적: 실제 adapter·구간 처리·전사 중계를 거쳐 녹음 중 전사와 최종 drain을 보호한다.
-# 준비: 모델 추론만 대체하고 로컬 WebSocket 서버에 실제 Modal adapter를 연결한다.
-# 실행: session.start → PCM → 첫 전사 → pause/resume → 마지막 PCM → stop.
-# 기대 결과: pause 전후 같은 화자의 발화가 이어지고 마지막 전사 뒤에 종료된다.
-# 실패 조건: stop 이전 전사가 없거나 pause만으로 발화를 나누거나 마지막 구간이 누락된다.
+# 목적: Modal 기동 중에도 음성을 받고 준비 후 입력 순서대로 전사·종료하는 흐름을 보호한다.
+# 준비: 모델 추론만 대체하고 실제 Modal adapter의 로컬 WebSocket 연결을 잠시 보류한다.
+# 실행: start/ready → 연결 준비 중 42개 PCM·heartbeat → 준비 완료 → 전사 → pause/resume → stop.
+# 기대 결과: 준비 중 ACK·pong을 받고 PCM 원본 순서와 pause 전후 발화·최종 drain이 유지된다.
+# 실패 조건: 준비 때문에 ready·수신이 막히거나 32개 이후 버퍼 초과·PCM 유실·구간 누락이 난다.
 def test_modal_transcript_before_stop_and_final_drain(monkeypatch):
     class Runtime(InferenceRuntime):
         def __init__(self):
@@ -35,9 +35,11 @@ def test_modal_transcript_before_stop_and_final_drain(monkeypatch):
                 "mel_step": 100,
             }
             self.metadata = {"test": True}
+            self.audio = []
             self.start_runtime()
 
         async def diarize(self, session, pcm, *, last):
+            self.audio.append(pcm)
             speaker = 0 if session.frames < 200 else 1
             active = session.frames < 100 or session.frames >= 200
             return {
@@ -67,11 +69,16 @@ def test_modal_transcript_before_stop_and_final_drain(monkeypatch):
                 await asyncio.sleep(0.01)
 
     asyncio.run(wait_started())
-    monkeypatch.setattr(
-        adapter_module,
-        "connect",
-        lambda url, **kwargs: connect(f"ws://127.0.0.1:{port}/transcribe", **kwargs),
-    )
+    ready_to_connect = threading.Event()
+    connecting = threading.Event()
+
+    async def delayed_connect(url, **kwargs):
+        connecting.set()
+        while not ready_to_connect.is_set():
+            await asyncio.sleep(0.01)
+        return await connect(f"ws://127.0.0.1:{port}/transcribe", **kwargs)
+
+    monkeypatch.setattr(adapter_module, "connect", delayed_connect)
     # 기존 테스트의 공급자 대체 대신 실제 Modal adapter를 사용한다.
     monkeypatch.setattr("meety_ai.live.ModalSTTClient", adapter_module.ModalSTTClient)
     app = create_live_app()
@@ -89,12 +96,26 @@ def test_modal_transcript_before_stop_and_final_drain(monkeypatch):
                         "title": "개발 회의",
                     }
                 )
-                assert ws.receive_json()["type"] == "session.ready"
+                with ThreadPoolExecutor(max_workers=1) as receiver:
+                    response = receiver.submit(ws.receive_json)
+                    try:
+                        assert response.result(timeout=1)["type"] == "session.ready"
+                    finally:
+                        if not response.done():
+                            ready_to_connect.set()
 
-                for sequence in range(3):
+                assert connecting.wait(1)
+                chunks = [bytes([i]) * 800 for i in range(40)] + [b"A" * 32000, b"B" * 32000]
+                for sequence, chunk in enumerate(chunks):
                     ws.send_json({"type": "audio.meta", "payload": {"sequence": sequence}})
-                    ws.send_bytes(bytes(32000))
+                    ws.send_bytes(chunk)
                     assert ws.receive_json()["type"] == "audio.ack"
+                ws.send_json(
+                    {"type": "heartbeat.ping", "requestId": "loading", "recordingSessionId": 1}
+                )
+                assert ws.receive_json()["type"] == "heartbeat.pong"
+                assert not runtime.sessions
+                ready_to_connect.set()
                 first = ws.receive_json()
                 assert first["type"] == "transcript.committed"
                 assert first["payload"]["speakerId"] == 0
@@ -105,8 +126,8 @@ def test_modal_transcript_before_stop_and_final_drain(monkeypatch):
                 assert ws.receive_json()["type"] == "session.paused"
                 ws.send_json({"type": "session.resume", "requestId": "resume"})
                 assert ws.receive_json()["type"] == "session.resumed"
-                ws.send_json({"type": "audio.meta", "payload": {"sequence": 3}})
-                ws.send_bytes(bytes(32000))
+                ws.send_json({"type": "audio.meta", "payload": {"sequence": len(chunks)}})
+                ws.send_bytes(b"C" * 32000)
                 assert ws.receive_json()["type"] == "audio.ack"
                 ws.send_json({"type": "session.stop", "requestId": "stop"})
                 final = ws.receive_json()
@@ -121,7 +142,9 @@ def test_modal_transcript_before_stop_and_final_drain(monkeypatch):
                 assert ended["payload"]["audioDurationMs"] == 4000
             assert app.state.recording_connections == 0
         assert not runtime.sessions
+        assert b"".join(runtime.audio) == b"".join(chunks) + b"C" * 32000
     finally:
+        ready_to_connect.set()
         server.should_exit = True
         thread.join(timeout=5)
         listener.close()

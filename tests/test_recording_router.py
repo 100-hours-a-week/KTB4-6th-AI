@@ -497,8 +497,8 @@ def test_provider_disconnect_while_waiting_for_input(fake_speechmatics_client, m
 # 테스트 이름: test_provider_disconnect_during_start
 # 목적: STT 시작을 기다리는 중에도 공급자 오류가 즉시 전달되도록 한다.
 # 준비: 공급자 start를 보류하고 종료·취소 여부를 신호로 관찰한다.
-# 실행: start 처리 진입 후 공급자 오류를 발생시키고 추가 입력 없이 종료를 기다린다.
-# 기대 결과: 시작 대기가 취소되고 provider_unavailable → close 1011 이후 자원이 정리된다.
+# 실행: start/ready 이후 공급자 오류를 발생시키고 추가 입력 없이 종료를 기다린다.
+# 기대 결과: 기동 중에도 ready를 받고, 오류 시 시작 취소·provider_unavailable·자원 정리가 된다.
 # 실패 조건: 시작 완료나 다음 입력까지 오류 전달이 보류되거나 자원이 남으면 실패한다.
 def test_provider_disconnect_during_start(fake_speechmatics_client):
     app = create_live_app()
@@ -528,6 +528,7 @@ def test_provider_disconnect_during_start(fake_speechmatics_client):
             provider.start = waiting_start
             ws.send_json(start_message)
             assert starting.wait(3), "STT 시작 처리에 진입하지 않았습니다."
+            assert ws.receive_json()["type"] == "session.ready"
 
             client.portal.call(provider.emit_disconnect)
 

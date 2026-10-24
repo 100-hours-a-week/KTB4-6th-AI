@@ -32,7 +32,8 @@ MAX_TEXT_SIZE = 16 * 1024
 BINARY_WAIT_TIMEOUT = 10
 STT_STOP_TIMEOUT = 30
 STT_SEND_TIMEOUT = 10
-MAX_PENDING_AUDIO_CHUNKS = 32
+# Modal 기동 대기 240초 분량의 16kHz mono PCM을 보관한다.
+MAX_PENDING_AUDIO_BYTES = 240 * 32000
 
 
 class RecordingConnection:
@@ -41,9 +42,8 @@ class RecordingConnection:
     def __init__(self, websocket: WebSocket, stt_client_factory: Callable[..., STTClient]) -> None:
         self._websocket = websocket
         self._transcript_queue: TranscriptQueue = asyncio.Queue()
-        self._audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue(
-            maxsize=MAX_PENDING_AUDIO_CHUNKS
-        )
+        self._audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+        self._pending_audio_bytes = 0
         self._sender_task: asyncio.Task[None] | None = None
         self._audio_task: asyncio.Task[None] | None = None
         self._background_error: asyncio.Future[Exception] = (
@@ -129,36 +129,22 @@ class RecordingConnection:
         response = await self._session.handle_event(event)
 
         if isinstance(event, SessionStart):
-            await self._start_transcription(event)
+            self._start_transcription(event)
         elif isinstance(event, AudioMeta):
             self._binary_deadline = asyncio.get_running_loop().time() + BINARY_WAIT_TIMEOUT
         elif isinstance(event, SessionStop):
             await self._finish_transcription()
         return response
 
-    async def _start_transcription(self, event: SessionStart) -> None:
+    def _start_transcription(self, event: SessionStart) -> None:
         bind_contextvars(
             meeting_id=event.meeting_id,
             recording_session_id=event.recording_session_id,
         )
         logger.info("session_started")
         self._resumed = event.start_sequence > 0 or event.transcript_sequence_start > 0
-        context = "\n".join(
-            f"{label}: {value}"
-            for label, value in (
-                ("회의 제목", event.title),
-                ("목적", event.purpose),
-                ("비고", event.notes),
-            )
-            if value
-        )
-        await self._stt_client.start(
-            meeting_id=event.meeting_id,
-            recording_session_id=event.recording_session_id,
-            context=context,
-        )
         self._sender_task = asyncio.create_task(self._forward_transcripts(event))
-        self._audio_task = asyncio.create_task(self._forward_audio())
+        self._audio_task = asyncio.create_task(self._forward_audio(event))
 
     async def _finish_transcription(self) -> None:
         """남은 오디오와 마지막 전사를 모두 전달한 뒤 종료 응답을 허용한다."""
@@ -223,6 +209,9 @@ class RecordingConnection:
                 for task in tasks:
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
+                while not self._audio_queue.empty():
+                    self._audio_queue.get_nowait()
+                self._pending_audio_bytes = 0
             finally:
                 try:
                     await self._stt_client.close()
@@ -230,18 +219,36 @@ class RecordingConnection:
                     await self._session.close()
 
     async def _enqueue_audio(self, chunk: bytes) -> None:
-        try:
-            self._audio_queue.put_nowait(chunk)
-        except asyncio.QueueFull as error:
+        if self._pending_audio_bytes + len(chunk) > MAX_PENDING_AUDIO_BYTES:
             raise SessionProtocolError(
                 "audio_buffer_full", "STT 오디오 대기열이 가득 찼습니다."
-            ) from error
+            )
+        self._pending_audio_bytes += len(chunk)
+        self._audio_queue.put_nowait(chunk)
 
-    async def _forward_audio(self) -> None:
+    async def _forward_audio(self, event: SessionStart) -> None:
         try:
+            context = "\n".join(
+                f"{label}: {value}"
+                for label, value in (
+                    ("회의 제목", event.title),
+                    ("목적", event.purpose),
+                    ("비고", event.notes),
+                )
+                if value
+            )
+            await self._stt_client.start(
+                meeting_id=event.meeting_id,
+                recording_session_id=event.recording_session_id,
+                context=context,
+            )
+            logger.info("stt_ready", buffered_audio_bytes=self._pending_audio_bytes)
             while (chunk := await self._audio_queue.get()) is not None:
-                async with asyncio.timeout(STT_SEND_TIMEOUT):
-                    await self._stt_client.send_audio(chunk)
+                try:
+                    async with asyncio.timeout(STT_SEND_TIMEOUT):
+                        await self._stt_client.send_audio(chunk)
+                finally:
+                    self._pending_audio_bytes -= len(chunk)
         except Exception as error:
             self._on_error(error)
 

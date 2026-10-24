@@ -48,7 +48,7 @@ async def replay(url: str, pcm: bytes, output: Path, *, pause: bool, resumed: bo
                     }
                 )
             )
-            ready = json.loads(await asyncio.wait_for(ws.recv(), 300))
+            ready = json.loads(await asyncio.wait_for(ws.recv(), 5))
             assert ready["type"] == "session.ready", ready
             summary["readySeconds"] = time.perf_counter() - started
             origin = time.perf_counter()
@@ -118,9 +118,12 @@ async def replay(url: str, pcm: bytes, output: Path, *, pause: bool, resumed: bo
                         assert event["payload"]["audioDurationMs"] == samples * 1000 // 16000
                         break
                 await sender
-                assert any(segment["beforeStop"] for segment in segments), (
-                    "stop 이전 전사가 없습니다."
-                )
+                assert segments, "확정 전사가 없습니다."
+                # 짧은 녹음은 Modal 기동 중 끝날 수 있으므로 장시간 검증에서만 확인한다.
+                if samples >= 300 * 16000:
+                    assert any(segment["beforeStop"] for segment in segments), (
+                        "stop 이전 전사가 없습니다."
+                    )
                 async with asyncio.timeout(10):
                     async for _ in ws:
                         raise AssertionError("종료 뒤 추가 이벤트입니다.")
