@@ -58,3 +58,5 @@ Use `<type>: <Korean summary>`. Allowed types: `feat`, `fix`, `refactor`, `docs`
 `최소 재현 테스트의 주석 틀 → 사용자 구현 → 실패 재현 확인 → 버그 수정 → 동일 테스트 통과 확인`
 
 핵심 흐름 테스트 이후에는 실제 버그를 재현하는 경우에만 테스트를 추가한다. 사용자가 테스트 구현도 명시적으로 요청하면 해당 단계만 에이전트가 수행한다.
+
+- Before adding complexity for a speculative or vanishingly unlikely race or security edge case, explain the concrete failure mode, likelihood, and complexity cost to the user and get their buy-in. Do not silently expand scope for theoretical robustness.

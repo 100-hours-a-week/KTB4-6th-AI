@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted 
+Superseded by [ADR-0011](0011-frontend-pcm-live-audio.md)
 
 ---
 

@@ -23,11 +23,6 @@ RUN uv sync --frozen --no-dev
 FROM python:3.12-slim AS runtime
 WORKDIR /app
 
-# 오디오 세그먼트 포맷 변환 등에 필요한 ffmpeg 설치
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
-
 RUN useradd -m appuser
 
 # 빌드 스테이지의 가상환경(.venv)과 소스 코드를 함께 복사

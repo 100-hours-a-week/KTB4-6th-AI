@@ -7,8 +7,6 @@ from pydantic import Field, TypeAdapter
 
 from meety_ai.core.schemas import Identifier, MeetingId, Message, NonNegativeInt, RecordingSessionId
 
-AudioFormat = Literal["webm_opus", "mp4_aac"]
-
 
 class SessionParticipant(Message):
     team_member_id: NonNegativeInt | None
@@ -23,6 +21,13 @@ class SessionStart(Message):
     recording_session_id: RecordingSessionId = Field(strict=False)
     participant_count: NonNegativeInt
     participants: list[SessionParticipant]
+    start_sequence: NonNegativeInt = Field(
+        default=0, description="0부터 세는 녹음 전체 오디오 순번"
+    )
+    transcript_sequence_start: NonNegativeInt = Field(default=0, description="첫 전사에 붙일 순번")
+    title: str = Field(default="", max_length=900)
+    purpose: str = Field(default="", max_length=900)
+    notes: str = Field(default="", max_length=900)
 
 
 class SessionReadyPayload(Message):
@@ -40,32 +45,12 @@ class SessionReady(Message):
     payload: SessionReadyPayload
 
 
-class DecoderResetPayload(Message):
-    audio_format: AudioFormat
-
-
-class DecoderReset(Message):
-    type: Literal["decoder.reset"]
-    request_id: Identifier
-    payload: DecoderResetPayload
-
-
-class DecoderReadyPayload(Message):
-    status: Literal["READY"]
-    input_audio_format: AudioFormat
-
-
-class DecoderReady(Message):
-    type: Literal["decoder.ready"]
-    request_id: Identifier
-    payload: DecoderReadyPayload
-
-
 class TranscriptCommittedPayload(Message):
     sequence_number: NonNegativeInt
     content: str
     started_at_ms: NonNegativeInt
     ended_at_ms: NonNegativeInt
+    speaker_id: NonNegativeInt | None = None
     recognized_at: datetime
 
 
@@ -83,6 +68,24 @@ class AudioMetaPayload(Message):
 class AudioMeta(Message):
     type: Literal["audio.meta"]
     payload: AudioMetaPayload
+
+
+class AudioAck(Message):
+    type: Literal["audio.ack"]
+    recording_session_id: RecordingSessionId
+    payload: AudioMetaPayload
+
+
+class HeartbeatPing(Message):
+    type: Literal["heartbeat.ping"]
+    request_id: Identifier
+    recording_session_id: RecordingSessionId = Field(strict=False)
+
+
+class HeartbeatPong(Message):
+    type: Literal["heartbeat.pong"]
+    request_id: Identifier
+    recording_session_id: RecordingSessionId
 
 
 class SessionPause(Message):
@@ -142,9 +145,9 @@ class SessionErrorPayload(Message):
         "unexpected_binary",
         "expected_binary",
         "message_too_large",
-        "audio_decode_failed",
         "provider_unavailable",
         "processing_timeout",
+        "audio_buffer_full",
     ]
     message: str
     retryable: Literal[True, False]
@@ -157,7 +160,7 @@ class SessionError(Message):
 
 
 ClientEvent = Annotated[
-    SessionStart | DecoderReset | AudioMeta | SessionPause | SessionResume | SessionStop,
+    SessionStart | AudioMeta | HeartbeatPing | SessionPause | SessionResume | SessionStop,
     Field(discriminator="type"),
 ]
 

@@ -1,5 +1,7 @@
 """회의 전체 음성의 화자 분리를 Modal L4 GPU에서 실행한다.
 
+배포: modal deploy -m meety_ai.modal_app.diarization
+
 분석 서비스는 배포된 함수를 Modal Python SDK로 호출한다.
     modal.Function.from_name("meety-diarization", "diarize").remote(audio_url)
 """

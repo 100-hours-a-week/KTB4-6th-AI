@@ -4,6 +4,8 @@
 
 Accepted
 
+MediaRecorder 스트림·디코더 전환을 전제로 한 복구 절차는 [ADR-0011](0011-frontend-pcm-live-audio.md)로 변경한다. FE의 원본 영속 보관·최종 파일 변환·업로드 책임은 유지하며, PCM 전환에 따른 저장·변환 세부 구현은 FE에서 확인한다.
+
 ---
 
 ## Context

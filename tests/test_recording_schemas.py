@@ -39,18 +39,18 @@ def test_valid_session_start():
     ]
 
 
-# 지원하지 않는 녹음 형식의 스트림 시작 요청이 시스템 안으로 들어오는 것을 막는다.
+# 제거된 디코더 제어 메시지를 거부한다.
 def test_invalid_decoder_reset():
     raw = """{
         "type": "decoder.reset",
         "requestId": "reset-1",
-        "payload": {"audioFormat": "mp3"}
+        "payload": {"audioFormat": "webm_opus"}
     }"""
 
     with pytest.raises(ValidationError) as error:
         client_event_adapter.validate_json(raw)
 
-    assert error.value.errors()[0]["loc"] == ("decoder.reset", "payload", "audioFormat")
+    assert error.value.errors()[0]["type"] == "union_tag_invalid"
 
 
 # sequence의 정수·범위 계약을 보호한다.
@@ -74,7 +74,7 @@ def test_invalid_sequence_type_or_range(bad_sequence):
 # 이슈 #77용: 숫자 문자열 입력 호환과 정수 ID 응답을 검증한다.
 @pytest.mark.parametrize("meeting_id, recording_session_id", [("42", "88"), (42, 88), (0, 0)])
 def test_recording_accepts_backend_numeric_string_ids_and_returns_integer_ids(
-    meeting_id, recording_session_id, fake_decoders, fake_speechmatics_client
+    meeting_id, recording_session_id, fake_speechmatics_client
 ):
     WEBSOCKET_URL = "/v1/live-meeting"
 
@@ -90,14 +90,6 @@ def test_recording_accepts_backend_numeric_string_ids_and_returns_integer_ids(
             {"teamMemberId": None, "name": "외부 디자이너"},
         ],
     }
-
-    reset_message = {
-        "type": "decoder.reset",
-        "requestId": "reset-01",
-        "payload": {"audioFormat": "webm_opus"},
-    }
-
-    WEBM_HEAD = b"\x1a\x45\xdf\xa3"
 
     meta_message = {"type": "audio.meta", "payload": {"sequence": 0}}
     stop_message = {"type": "session.stop", "requestId": "stop-01"}
@@ -117,10 +109,9 @@ def test_recording_accepts_backend_numeric_string_ids_and_returns_integer_ids(
             assert ready["type"] == "session.ready"
             assert ready["requestId"] == "start-01"
 
-            ws.send_json(reset_message)
-            assert ws.receive_json()["type"] == "decoder.ready"
             ws.send_json(meta_message)
-            ws.send_bytes(WEBM_HEAD + b"compressed audio")
+            ws.send_bytes(b"\x01\x00" * 8000)
+            assert ws.receive_json()["type"] == "audio.ack"
             fake_speechmatics_client[0].emit_transcript()
             transcript = ws.receive_json()
             assert transcript["type"] == "transcript.committed"
@@ -143,7 +134,5 @@ def test_recording_accepts_backend_numeric_string_ids_and_returns_integer_ids(
             assert error.value.code == 1000
 
         assert app.state.recording_connections == 0
-        assert len(fake_decoders) == 1
-        assert fake_decoders[0].closed
         assert fake_speechmatics_client[0].closed
         assert fake_speechmatics_client[0].finished
