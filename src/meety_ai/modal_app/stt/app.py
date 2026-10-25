@@ -5,6 +5,8 @@ import uuid
 
 import modal
 
+from meety_ai.modal_app.stt.pipeline import MAX_SESSIONS
+
 app = modal.App("meety-realtime-stt")
 cache = modal.Volume.from_name("meety-stt-learning-model-cache", create_if_missing=True)
 image = (
@@ -47,7 +49,7 @@ image = (
     enable_memory_snapshot=True,
     experimental_options={"enable_gpu_snapshot": True},
 )
-@modal.concurrent(max_inputs=1)
+@modal.concurrent(max_inputs=MAX_SESSIONS)
 class TranscriptionWorker:
     @modal.enter(snap=True)
     def load(self):

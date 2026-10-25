@@ -31,7 +31,8 @@ logger = logging.getLogger(__name__)
 ASR_MODEL = "TeamUNIVA/qwen3_asr_1.7b_ko"
 ASR_REVISION = "3e66f586033753589c3effeb2c8cbce46a1ddabb"
 NEMOTRON_REVISION = "f667ed73aee57d40cc39428eb768b4fd87a0a29e"
-MAX_SESSIONS = 1
+# shortcut: GPU당 10개는 5분 부하로만 검증, 장시간 측정 후 한도를 재검토한다.
+MAX_SESSIONS = 10
 BATCH_SIZE = 8
 BATCH_WAIT_SECONDS = 0.05
 QUEUE_WAIT_SECONDS = 5

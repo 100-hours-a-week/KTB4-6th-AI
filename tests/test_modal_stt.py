@@ -305,3 +305,11 @@ async def test_same_speaker_turns_merge_within_one_second(gap_frames):
         await runtime.release(session)
         runtime.asr_task.cancel()
         await asyncio.gather(runtime.asr_task, return_exceptions=True)
+
+
+# 테스트 이름: test_modal_concurrent_sessions_keep_transcripts_separate
+# 목적: 같은 GPU worker에서 두 회의의 전사와 종료 처리가 서로 영향을 주지 않게 한다.
+# 준비: 하나의 Runtime과 create_inference_app에 서로 다른 회의·녹음 세션으로 연결한다.
+# 실행: 두 연결에 구분되는 PCM을 동시에 보내고 첫 회의 종료 후 두 번째 회의 입력을 이어간다.
+# 기대 결과: 전사·화자·시간축이 회의별로 유지되고 각 연결은 최종 전사 후 정상 종료된다.
+# 실패 조건: 두 번째 회의를 거절하거나 결과가 섞이거나 첫 회의 정리가 다른 회의를 중단한다.
