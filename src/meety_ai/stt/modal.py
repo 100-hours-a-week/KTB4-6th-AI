@@ -9,6 +9,7 @@ from meety_ai.modal_app.stt.protocol import (
     MAX_AUDIO_MESSAGE_BYTES,
     PipelineFailure,
     SegmentCommitted,
+    SegmentFailed,
     SessionEnded,
     SessionReady,
     SessionStart,
@@ -36,7 +37,7 @@ class ModalSTTClient:
         self._receiver: asyncio.Task | None = None
         self._error: STTProviderError | None = None
         self._closing = self._finishing = self._ended = False
-        self._received_segments = self._sent_bytes = 0
+        self._received_segments = self._failed_segments = self._sent_bytes = 0
 
     def _report_error(self) -> STTProviderError:
         if self._error is None:
@@ -87,12 +88,17 @@ class ModalSTTClient:
                 result = result_adapter.validate_json(await self._websocket.recv())
                 if isinstance(result, PipelineFailure):
                     raise self._report_error()
-                if isinstance(result, SegmentCommitted):
+                if isinstance(result, (SegmentCommitted, SegmentFailed)):
                     if (
-                        result.segment_id != self._received_segments
+                        result.segment_id != self._received_segments + self._failed_segments
                         or result.ended_at_ms > self._sent_bytes * 1000 // 32000
                     ):
                         raise self._report_error()
+                    if isinstance(result, SegmentFailed):
+                        if result.code != "empty_transcript":
+                            raise self._report_error()
+                        self._failed_segments += 1
+                        continue
                     self._on_transcript(
                         STTTranscript(
                             content=result.content,
@@ -106,6 +112,7 @@ class ModalSTTClient:
                     if (
                         not self._finishing
                         or result.succeeded_segments != self._received_segments
+                        or result.failed_segments != self._failed_segments
                         or result.received_samples != self._sent_bytes // 2
                         or result.audio_duration_ms != self._sent_bytes * 1000 // 32000
                         or result.unscored_tail_samples > result.received_samples

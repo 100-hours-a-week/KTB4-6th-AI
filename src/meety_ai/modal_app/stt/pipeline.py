@@ -449,9 +449,24 @@ class InferenceRuntime:
                             },
                         }
                         if error:
-                            message = {"type": "segment.failed", "code": error}
+                            message["code"] = error
                             session.failed += 1
-                            session.failure = error
+                            if error != "empty_transcript":
+                                session.failure = error
+                            logger.warning(
+                                "asr_segment_failed meetingId=%s recordingSessionId=%s "
+                                "segmentId=%s speakerId=%s startedAtMs=%s endedAtMs=%s "
+                                "durationMs=%s reason=%s code=%s",
+                                session.start.meeting_id,
+                                session.start.recording_session_id,
+                                job.segment_id,
+                                job.speaker,
+                                message["startedAtMs"],
+                                message["endedAtMs"],
+                                (job.end_sample - job.start_sample) * 1000 // SAMPLE_RATE,
+                                job.reason,
+                                error,
+                            )
                         else:
                             message["content"] = text
                             session.succeeded += 1

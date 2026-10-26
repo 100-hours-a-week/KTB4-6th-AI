@@ -22,10 +22,11 @@ from meety_ai.modal_app.stt.protocol import SessionStart
 # 테스트 이름: test_modal_transcript_before_stop_and_final_drain
 # 목적: Modal 기동 중에도 음성을 받고 준비 후 입력 순서대로 전사·종료하는 흐름을 보호한다.
 # 준비: 모델 추론만 대체하고 실제 Modal adapter의 로컬 WebSocket 연결을 잠시 보류한다.
-# 실행: start/ready → 연결 준비 중 42개 PCM·heartbeat → 준비 완료 → 전사 → pause/resume → stop.
-# 기대 결과: 준비 중 ACK·pong을 받고 PCM 원본 순서와 pause 전후 발화·최종 drain이 유지된다.
-# 실패 조건: 준비 때문에 ready·수신이 막히거나 32개 이후 버퍼 초과·PCM 유실·구간 누락이 난다.
-def test_modal_transcript_before_stop_and_final_drain(monkeypatch):
+# 실행: 연결 준비 중 42개 PCM·heartbeat → 첫 전사 → pause/resume → 중간·다음 전사 → stop.
+# 기대 결과: 준비 중 ACK·pong, PCM 순서, 빈 결과 뒤 화자·전사 번호와 마지막 전사 drain을 유지한다.
+# 실패 조건: 준비 중 수신이 막히거나 PCM이 유실되거나 빈 결과로 종료·화자 정보 소실이 난다.
+@pytest.mark.parametrize("empty_middle_turn", [False, True])
+def test_modal_transcript_before_stop_and_final_drain(monkeypatch, capsys, empty_middle_turn):
     class Runtime(InferenceRuntime):
         def __init__(self):
             self.geometry = {
@@ -40,15 +41,25 @@ def test_modal_transcript_before_stop_and_final_drain(monkeypatch):
 
         async def diarize(self, session, pcm, *, last):
             self.audio.append(pcm)
-            speaker = 0 if session.frames < 200 else 1
-            active = session.frames < 100 or session.frames >= 200
+            speaker = 0 if session.frames < 200 else (1 if session.frames < 500 else 2)
+            active = (
+                session.frames < 100
+                or 200 <= session.frames < 300
+                or 500 <= session.frames < 600
+                or session.frames >= 800
+            )
             return {
                 "active": [[int(active and i == speaker) for i in range(8)]] * (len(pcm) // 320),
                 "next_start": session.next_sample + len(pcm) // 2,
             }
 
         def _transcribe(self, jobs):
-            return [(f"화자 {job.speaker}의 발언", None) for job in jobs]
+            return [
+                ("", "empty_transcript")
+                if empty_middle_turn and job.speaker == 1
+                else (f"화자 {job.speaker}의 발언", None)
+                for job in jobs
+            ]
 
         async def _call_worker(self, request):
             return {"released": True}
@@ -126,23 +137,59 @@ def test_modal_transcript_before_stop_and_final_drain(monkeypatch):
                 assert ws.receive_json()["type"] == "session.paused"
                 ws.send_json({"type": "session.resume", "requestId": "resume"})
                 assert ws.receive_json()["type"] == "session.resumed"
-                ws.send_json({"type": "audio.meta", "payload": {"sequence": len(chunks)}})
-                ws.send_bytes(b"C" * 32000)
-                assert ws.receive_json()["type"] == "audio.ack"
-                ws.send_json({"type": "session.stop", "requestId": "stop"})
-                final = ws.receive_json()
-                ended = ws.receive_json()
+                remaining = [bytes([value]) * 32000 for value in range(6)]
+                for sequence, chunk in enumerate(remaining, start=len(chunks)):
+                    ws.send_json({"type": "audio.meta", "payload": {"sequence": sequence}})
+                    ws.send_bytes(chunk)
+                responses = [ws.receive_json() for _ in range(7 if empty_middle_turn else 8)]
+                assert sum(event["type"] == "audio.ack" for event in responses) == 6
+                transcripts = [
+                    event for event in responses if event["type"] == "transcript.committed"
+                ]
+                assert len(transcripts) == (1 if empty_middle_turn else 2)
+                if not empty_middle_turn:
+                    middle = transcripts[0]
+                    assert middle["payload"]["speakerId"] == 1
+                    assert middle["payload"]["sequenceNumber"] == 1
+                final = transcripts[-1]
                 assert final["type"] == "transcript.committed"
-                assert final["payload"]["speakerId"] == 1
-                assert final["payload"]["content"] == "화자 1의 발언"
-                assert final["payload"]["startedAtMs"] == 2000
-                assert final["payload"]["endedAtMs"] == 4000
-                assert final["payload"]["sequenceNumber"] == 1
+                assert final["payload"]["speakerId"] == 2
+                assert final["payload"]["content"] == "화자 2의 발언"
+                assert final["payload"]["startedAtMs"] == 5000
+                assert final["payload"]["endedAtMs"] == 6000
+                assert final["payload"]["sequenceNumber"] == (1 if empty_middle_turn else 2)
+                ws.send_json({"type": "session.stop", "requestId": "stop"})
+                tail = ws.receive_json()
+                assert tail["type"] == "transcript.committed"
+                assert tail["payload"]["speakerId"] == 2
+                assert tail["payload"]["content"] == "화자 2의 발언"
+                assert tail["payload"]["startedAtMs"] == 8000
+                assert tail["payload"]["endedAtMs"] == 9000
+                assert tail["payload"]["sequenceNumber"] == final["payload"]["sequenceNumber"] + 1
+                ended = ws.receive_json()
                 assert ended["type"] == "session.ended"
-                assert ended["payload"]["audioDurationMs"] == 4000
+                assert ended["payload"]["audioDurationMs"] == 9000
             assert app.state.recording_connections == 0
         assert not runtime.sessions
-        assert b"".join(runtime.audio) == b"".join(chunks) + b"C" * 32000
+        assert b"".join(runtime.audio) == b"".join(chunks + remaining)
+        if empty_middle_turn:
+            failure = next(
+                line
+                for line in capsys.readouterr().out.splitlines()
+                if "asr_segment_failed" in line
+            )
+            for field in (
+                "meetingId=1",
+                "recordingSessionId=1",
+                "segmentId=1",
+                "speakerId=1",
+                "startedAtMs=2000",
+                "endedAtMs=3000",
+                "durationMs=1000",
+                "reason=silence",
+                "code=empty_transcript",
+            ):
+                assert field in failure
     finally:
         ready_to_connect.set()
         server.should_exit = True
@@ -285,9 +332,7 @@ async def test_same_speaker_turns_merge_within_one_second(gap_frames):
             return {"released": True}
 
     runtime = Runtime()
-    session = runtime.open(
-        SessionStart(type="session.start", meeting_id=1, recording_session_id=1)
-    )
+    session = runtime.open(SessionStart(type="session.start", meeting_id=1, recording_session_id=1))
     try:
         await session.feed(bytes((60 + gap_frames) * 320))
         await session.finish()
