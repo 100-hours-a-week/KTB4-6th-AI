@@ -48,24 +48,42 @@ class SegmentCommitted(Message):
         return self
 
 
+class SegmentFailed(Message):
+    type: Literal["segment.failed"]
+    segment_id: NonNegativeInt
+    speaker_id: Annotated[int, Field(ge=0, le=7)] | None
+    started_at_ms: NonNegativeInt
+    ended_at_ms: NonNegativeInt
+    reason: str
+    recognized_at: str
+    timings: dict
+    code: str
+
+    @model_validator(mode="after")
+    def validate_segment(self):
+        if self.started_at_ms >= self.ended_at_ms:
+            raise ValueError("비어 있지 않은 시간 구간이 필요합니다.")
+        return self
+
+
 class SessionEnded(Message):
     type: Literal["session.ended"]
     status: Literal["completed"]
     succeeded_segments: NonNegativeInt
-    failed_segments: Literal[0]
+    failed_segments: NonNegativeInt
     received_samples: NonNegativeInt
     audio_duration_ms: NonNegativeInt
     unscored_tail_samples: NonNegativeInt
 
 
 class PipelineFailure(Message):
-    type: Literal["error", "segment.failed"]
+    type: Literal["error"]
     code: str
 
 
 result_adapter = TypeAdapter(
     Annotated[
-        SessionReady | SegmentCommitted | SessionEnded | PipelineFailure,
+        SessionReady | SegmentCommitted | SegmentFailed | SessionEnded | PipelineFailure,
         Field(discriminator="type"),
     ]
 )
