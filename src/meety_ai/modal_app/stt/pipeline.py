@@ -23,8 +23,9 @@ from meety_ai.modal_app.stt.protocol import (
     MAX_AUDIO_MESSAGE_BYTES,
     MAX_TEXT_MESSAGE_BYTES,
     SAMPLE_RATE,
+    ContextUpdate,
     SessionStart,
-    SessionStop,
+    control_adapter,
 )
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,7 @@ class ASRJob:
 class PipelineSession:
     def __init__(self, runtime: "InferenceRuntime", start: SessionStart):
         self.runtime, self.start = runtime, start
+        self.context = start.context
         self.key = uuid.uuid4().hex
         self.pcm = bytearray()
         self.base_sample = self.total_bytes = self.next_sample = self.frames = self.mel_cursor = 0
@@ -382,7 +384,7 @@ class InferenceRuntime:
         try:
             outputs = self.asr.transcribe(
                 audio=audio,
-                context=[job.session.start.context for job in jobs],
+                context=[job.session.context for job in jobs],
                 language="Korean",
                 return_time_stamps=False,
             )
@@ -573,7 +575,10 @@ def create_inference_app(runtime: InferenceRuntime) -> FastAPI:
                         text = message.get("text", "")
                         if len(text.encode("utf-8")) > MAX_TEXT_MESSAGE_BYTES:
                             raise PipelineError("invalid_message")
-                        SessionStop.model_validate_json(text)
+                        event = control_adapter.validate_json(text)
+                        if isinstance(event, ContextUpdate):
+                            session.context = event.context
+                            continue
                         async with asyncio.timeout(DRAIN_TIMEOUT_SECONDS):
                             await session.finish()
                         return

@@ -11,12 +11,154 @@ from types import SimpleNamespace
 import pytest
 import uvicorn
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from websockets.asyncio.client import connect
 
 import meety_ai.stt.modal as adapter_module
 from meety_ai.live import create_live_app
 from meety_ai.modal_app.stt.pipeline import InferenceRuntime, create_inference_app
 from meety_ai.modal_app.stt.protocol import SessionStart
+
+
+# 테스트 이름: test_modal_context_update_applies_to_next_inference
+# 목적: 같은 연결에서 맥락을 갱신해도 진행 중인 추론과 다른 세션을 변경하지 않는다.
+# 준비: 실제 adapter·WebSocket·파이프라인을 연결하고 수치 처리 의존성과 모델만 대체한다.
+# 실행: 기본 맥락 추론 시작 → 다음 구간 대기 → 맥락 갱신 → 추론 재개 → 다른 세션 전사 → 종료.
+# 기대 결과: 다음 추론부터 새 맥락을 쓰고 화자·시간축·마지막 전사와 세션 정리를 유지한다.
+# 실패 조건: 맥락이 소급되거나 세션 간 섞이거나 큐에 있던 구간에 갱신이 반영되지 않는다.
+async def test_modal_context_update_applies_to_next_inference(monkeypatch):
+    class Waveform:
+        def __init__(self, pcm):
+            self.samples = len(pcm) // 2
+
+        def astype(self, dtype):
+            return self
+
+        def __truediv__(self, divisor):
+            return self
+
+        def __len__(self):
+            return self.samples
+
+    monkeypatch.setitem(
+        sys.modules,
+        "numpy",
+        SimpleNamespace(frombuffer=lambda pcm, dtype: Waveform(pcm), float32=float),
+    )
+    monkeypatch.setitem(
+        sys.modules, "torch", SimpleNamespace(cuda=SimpleNamespace(OutOfMemoryError=MemoryError))
+    )
+    loop = asyncio.get_running_loop()
+    first_started = asyncio.Event()
+    resume_first = threading.Event()
+    calls = []
+
+    class Runtime(InferenceRuntime):
+        def __init__(self):
+            self.geometry = {
+                "first_samples": 16000,
+                "chunk_samples": 16000,
+                "frame_samples": 160,
+                "mel_step": 100,
+            }
+            self.metadata = {"test": True}
+            self.generations = []
+            self.asr = SimpleNamespace(transcribe=self.transcribe)
+            self.start_runtime()
+
+        async def diarize(self, session, pcm, *, last):
+            return {
+                "active": [
+                    [int(frame % 300 < 100), 0, 0, 0, 0, 0, 0, 0]
+                    for frame in range(session.frames, session.frames + len(pcm) // 320)
+                ],
+                "next_start": session.next_sample + len(pcm) // 2,
+            }
+
+        def transcribe(self, *, audio, context, language, return_time_stamps):
+            calls.append(tuple(context))
+            if len(calls) == 1:
+                loop.call_soon_threadsafe(first_started.set)
+                assert resume_first.wait(timeout=5)
+            self.generations.extend({"finish_reason": "stop"} for _ in audio)
+            return [SimpleNamespace(text=f"전사: {value}") for value in context]
+
+        async def _call_worker(self, request):
+            return {"released": True}
+
+    async def wait_until(predicate):
+        async with asyncio.timeout(5):
+            while not predicate():
+                await asyncio.sleep(0.01)
+
+    runtime = Runtime()
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+    server = uvicorn.Server(
+        uvicorn.Config(create_inference_app(runtime), log_level="error", lifespan="off")
+    )
+    serving = asyncio.create_task(server.serve(sockets=[listener]))
+    transcripts = asyncio.Queue()
+    other_transcripts = asyncio.Queue()
+    errors = []
+    clients = [
+        adapter_module.ModalSTTClient(
+            f"ws://127.0.0.1:{port}/transcribe", "test", "test", callback, errors.append
+        )
+        for callback in (transcripts.put_nowait, other_transcripts.put_nowait)
+    ]
+    default_context = "기본 " * 1000
+    updated_context = "갱신 " * 266 + " 끝"
+    try:
+        async with asyncio.timeout(10):
+            await wait_until(lambda: server.started)
+            await clients[0].start(meeting_id=1, recording_session_id=1, context=default_context)
+            await clients[1].start(meeting_id=2, recording_session_id=2, context="다른 세션")
+            session, other = runtime.sessions.values()
+            original_key = session.key
+            await clients[0].send_audio(bytes(3 * 32000))
+            await first_started.wait()
+            await clients[0].send_audio(bytes(3 * 32000))
+            await wait_until(lambda: session.segments == 2)
+            with pytest.raises(ValidationError):
+                await clients[0].update_context(updated_context + " ")
+            await clients[0].update_context(updated_context)
+            await wait_until(lambda: session.context == updated_context)
+            assert session.key == original_key
+            assert session.start.context == default_context
+            assert other.context == "다른 세션"
+            assert runtime.asr_queue.qsize() == 1
+            resume_first.set()
+            first = await transcripts.get()
+            second = await transcripts.get()
+            assert first.content == f"전사: {default_context}"
+            assert second.content == f"전사: {updated_context}"
+            assert first.speaker_id == second.speaker_id == 0
+            assert (first.started_at_ms, first.ended_at_ms) == (0, 1000)
+            assert (second.started_at_ms, second.ended_at_ms) == (3000, 4000)
+            await clients[1].send_audio(bytes(3 * 32000))
+            assert (await other_transcripts.get()).content == "전사: 다른 세션"
+            await clients[0].update_context("")
+            await clients[0].send_audio(bytes(32000))
+            await clients[0].finish()
+            tail = await transcripts.get()
+            assert tail.content == "전사: "
+            assert (tail.started_at_ms, tail.ended_at_ms) == (6000, 7000)
+            await clients[1].finish()
+            await wait_until(lambda: not runtime.sessions)
+            assert calls == [(default_context,), (updated_context,), ("다른 세션",), ("",)]
+            assert not errors
+    finally:
+        resume_first.set()
+        for client in clients:
+            await client.close()
+        server.should_exit = True
+        await asyncio.wait_for(serving, timeout=5)
+        listener.close()
+        if runtime.asr_task is not None:
+            runtime.asr_task.cancel()
+            await asyncio.gather(runtime.asr_task, return_exceptions=True)
 
 
 # 테스트 이름: test_modal_transcript_before_stop_and_final_drain
