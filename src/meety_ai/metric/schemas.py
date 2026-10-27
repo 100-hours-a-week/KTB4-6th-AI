@@ -27,8 +27,8 @@ class MetricRequest(Message):
 
 
 class SegmentRange(Message):
-    start_segment_id: NonNegativeInt
-    end_segment_id: NonNegativeInt
+    start_index: NonNegativeInt
+    end_index: NonNegativeInt
 
 
 class ClassifiedTopic(Message):

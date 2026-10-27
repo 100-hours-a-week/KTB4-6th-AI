@@ -4,7 +4,7 @@
 # 준비: app.state.metric_chain을 고정 MetricClassification을 반환하는 AsyncMock으로 대체한다.
 # 준비: 전사 ID 10·30·20의 sequenceNumber는 0·1·2이다.
 # 준비: 전사 시각은 0~1000, 500~1500, 2000~3000ms이며 대표 화자는 1·1·null이다.
-# 준비: 안건 A 범위는 10~20, 안건 B와 잡담 범위는 30~30으로 중복 지정한다.
+# 준비: 안건 A 인덱스는 0~2, 안건 B와 잡담 인덱스는 1~1로 중복 지정한다.
 # 실행: TestClient로 POST /v1/metric에 requestId·meetingId·summary·segments를 전달한다.
 # 기대 결과: 200 JSON이며 총 소요 시간·초과 시간·화자 시간 필드는 없다.
 # 기대 결과: 안건 A 2500ms, 안건 B 1000ms, 잡담 1000ms이며 구간 범위는 응답에 포함하지 않는다.
@@ -54,18 +54,18 @@ def test_metric_route_returns_overlapping_estimates(metric_payload):
                 {
                     "title": "안건 A",
                     "ranges": [
-                        {"startSegmentId": 10, "endSegmentId": 20},
-                        {"startSegmentId": 10, "endSegmentId": 30},
+                        {"startIndex": 0, "endIndex": 2},
+                        {"startIndex": 0, "endIndex": 1},
                     ],
                 },
                 {
                     "title": "안건 B",
-                    "ranges": [{"startSegmentId": 30, "endSegmentId": 30}],
+                    "ranges": [{"startIndex": 1, "endIndex": 1}],
                 },
             ],
             "offTopic": [
                 {
-                    "ranges": [{"startSegmentId": 30, "endSegmentId": 30}],
+                    "ranges": [{"startIndex": 1, "endIndex": 1}],
                     "reason": "개인적인 잡담",
                 }
             ],
@@ -104,12 +104,12 @@ def test_metric_route_keeps_off_topic_duration_when_segments_are_missing(metric_
             "agendas": [
                 {
                     "title": "안건 A",
-                    "ranges": [{"startSegmentId": 10, "endSegmentId": 30}],
+                    "ranges": [{"startIndex": 0, "endIndex": 1}],
                 }
             ],
             "offTopic": [
                 {
-                    "ranges": [{"startSegmentId": 30, "endSegmentId": 30}],
+                    "ranges": [{"startIndex": 1, "endIndex": 1}],
                     "reason": "개인적인 잡담",
                 }
             ],
@@ -142,7 +142,7 @@ def test_metric_route_returns_error_status_on_generation_failure(metric_payload,
                     "agendas": [
                         {
                             "title": "안건 A",
-                            "ranges": [{"startSegmentId": 10, "endSegmentId": 999}],
+                            "ranges": [{"startIndex": 0, "endIndex": 999}],
                         }
                     ],
                     "offTopic": [],
