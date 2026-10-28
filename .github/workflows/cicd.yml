@@ -38,7 +38,7 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # 각 환경의 Modal 토큰은 서로 다른 Workspace를 가리켜야 같은 앱 이름이 충돌하지 않는다.
+    # 같은 Workspace 안에서 운영과 스테이징의 Modal Environment를 분리한다.
     environment:
       name: ${{ github.ref_name == 'dev' && 'staging' || 'production' }}
     concurrency:
@@ -46,13 +46,14 @@ jobs:
       cancel-in-progress: false
     env:
       DEPLOY_ENV: ${{ github.ref_name == 'dev' && 'staging' || 'production' }}
+      MODAL_ENVIRONMENT: ${{ github.ref_name == 'dev' && 'staging' || 'main' }}
       MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
     steps:
       - name: 배포 시크릿 검증
         run: |
           # 로그에서 브랜치와 선택된 GitHub Environment를 확인한다.
-          echo "::notice::Modal 배포 대상: branch=${GITHUB_REF_NAME}, environment=${DEPLOY_ENV}"
+          echo "::notice::Modal 배포 대상: branch=${GITHUB_REF_NAME}, environment=${DEPLOY_ENV}, modal_environment=${MODAL_ENVIRONMENT}"
           [ -n "$MODAL_TOKEN_ID" ]     || { echo "::error::secrets.MODAL_TOKEN_ID 가 비어 있습니다"; exit 1; }
           [ -n "$MODAL_TOKEN_SECRET" ] || { echo "::error::secrets.MODAL_TOKEN_SECRET 이 비어 있습니다"; exit 1; }
           echo "::notice::Modal 배포 시크릿: MODAL_TOKEN_ID, MODAL_TOKEN_SECRET 설정됨"
