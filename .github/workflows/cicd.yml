@@ -34,7 +34,7 @@ jobs:
           curl -H "Content-Type: application/json" -X POST -d "{\"content\": \"❌ [테스트 실패] ${{ github.repository }}\nBranch: ${{ github.ref_name }} (${{ github.sha }})\nAuthor: ${{ github.actor }}\nFailed Job: test\nError Message: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" "${{ secrets.DISCORD_WEBHOOK_URL }}"
 
   deploy-modal:
-    name: Modal 화자 분리·실시간 STT 배포
+    name: Modal 화자 분리·실시간 STT·화자 임베딩 배포
     needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -70,6 +70,8 @@ jobs:
         run: uv run modal deploy -m meety_ai.modal_app.diarization
       - name: Modal 실시간 STT 배포
         run: uv run modal deploy -m meety_ai.modal_app.stt.app
+      - name: Modal 화자 임베딩 배포
+        run: uv run modal deploy -m meety_ai.modal_app.speaker_embedding
       - name: Discord 알림 (Modal 배포 실패)
         if: failure()
         run: |
