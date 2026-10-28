@@ -1,10 +1,13 @@
 """Backend 전용 WebSocket의 연결 수를 제한하고 녹음 실행을 시작한다."""
 
+from functools import partial
+
 import structlog
 from fastapi import APIRouter, WebSocket
 from fastapi.responses import JSONResponse
 
 from meety_ai.recording.connection import RecordingConnection
+from meety_ai.stt.context import generate_stt_context
 
 logger = structlog.stdlib.get_logger(__name__)
 
@@ -30,7 +33,13 @@ async def start_recording_session(websocket: WebSocket) -> None:
         )
         return
 
-    connection = RecordingConnection(websocket, websocket.app.state.stt_client_factory)
+    state = websocket.app.state
+    connection = RecordingConnection(
+        websocket,
+        state.stt_client_factory,
+        partial(generate_stt_context, model=state.stt_context_model, client=state.backend_client),
+        state.settings.stt_context_timeout_seconds,
+    )
     websocket.app.state.recording_connections += 1
     try:
         await connection.run()

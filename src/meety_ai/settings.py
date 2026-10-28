@@ -53,6 +53,10 @@ class LiveSettings(Settings):
     modal_proxy_token_id: SecretStr = Field(validation_alias="MODAL_PROXY_TOKEN_ID")
     modal_proxy_token_secret: SecretStr = Field(validation_alias="MODAL_PROXY_TOKEN_SECRET")
     modal_stt_start_timeout_seconds: float = Field(default=240, gt=0)
+    openrouter_api_key: SecretStr = Field(validation_alias="OPENROUTER_API_KEY")
+    internal_api_key: SecretStr = Field(validation_alias="INTERNAL_API_KEY")
+    stt_context_model: str = "openai/gpt-6-luna"
+    stt_context_timeout_seconds: float = Field(default=180.0, gt=0)
 
 
 class AnalysisSettings(Settings):

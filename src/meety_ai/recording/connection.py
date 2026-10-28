@@ -2,7 +2,7 @@
 
 import asyncio
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
 import sentry_sdk
 import structlog
@@ -39,8 +39,18 @@ MAX_PENDING_AUDIO_BYTES = 240 * 32000
 class RecordingConnection:
     """연결 하나의 실행과 정리를 run() 호출 안에서 끝낸다."""
 
-    def __init__(self, websocket: WebSocket, stt_client_factory: Callable[..., STTClient]) -> None:
+    def __init__(
+        self,
+        websocket: WebSocket,
+        stt_client_factory: Callable[..., STTClient],
+        generate_context: Callable[[SessionStart], Awaitable[str]],
+        context_timeout_seconds: float,
+    ) -> None:
         self._websocket = websocket
+        self._generate_context = generate_context
+        self._context_timeout = context_timeout_seconds
+        self._context_task: asyncio.Task[None] | None = None
+        self._stt_ready = asyncio.Event()
         self._transcript_queue: TranscriptQueue = asyncio.Queue()
         self._audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
         self._pending_audio_bytes = 0
@@ -145,9 +155,13 @@ class RecordingConnection:
         self._resumed = event.start_sequence > 0 or event.transcript_sequence_start > 0
         self._sender_task = asyncio.create_task(self._forward_transcripts(event))
         self._audio_task = asyncio.create_task(self._forward_audio(event))
+        self._context_task = asyncio.create_task(self._apply_context(event))
 
     async def _finish_transcription(self) -> None:
         """남은 오디오와 마지막 전사를 모두 전달한 뒤 종료 응답을 허용한다."""
+        # 입력 종료를 알린 Modal 세션에는 맥락 갱신을 보내지 않는다.
+        if self._context_task is not None:
+            self._context_task.cancel()
         async with asyncio.timeout(STT_STOP_TIMEOUT):
             await self._audio_queue.put(None)
             await self._audio_task
@@ -205,7 +219,11 @@ class RecordingConnection:
         # ASGI 요청이 취소돼도 공급자와 백그라운드 작업은 끝까지 정리한다.
         with CancelScope(shield=True):
             try:
-                tasks = [task for task in (self._sender_task, self._audio_task) if task is not None]
+                tasks = [
+                    task
+                    for task in (self._sender_task, self._audio_task, self._context_task)
+                    if task is not None
+                ]
                 for task in tasks:
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
@@ -220,9 +238,7 @@ class RecordingConnection:
 
     async def _enqueue_audio(self, chunk: bytes) -> None:
         if self._pending_audio_bytes + len(chunk) > MAX_PENDING_AUDIO_BYTES:
-            raise SessionProtocolError(
-                "audio_buffer_full", "STT 오디오 대기열이 가득 찼습니다."
-            )
+            raise SessionProtocolError("audio_buffer_full", "STT 오디오 대기열이 가득 찼습니다.")
         self._pending_audio_bytes += len(chunk)
         self._audio_queue.put_nowait(chunk)
 
@@ -243,6 +259,7 @@ class RecordingConnection:
                 context=context,
             )
             logger.info("stt_ready", buffered_audio_bytes=self._pending_audio_bytes)
+            self._stt_ready.set()
             while (chunk := await self._audio_queue.get()) is not None:
                 try:
                     async with asyncio.timeout(STT_SEND_TIMEOUT):
@@ -251,6 +268,27 @@ class RecordingConnection:
                     self._pending_audio_bytes -= len(chunk)
         except Exception as error:
             self._on_error(error)
+
+    async def _apply_context(self, event: SessionStart) -> None:
+        """생성한 맥락을 STT 준비 후 전달하고, 생성 실패 시 기본 맥락을 유지한다."""
+        try:
+            async with asyncio.timeout(self._context_timeout):
+                context = await self._generate_context(event)
+        except Exception as error:
+            # 조회 거부·장애를 자료 없음으로 바꾸지 않고 생성 자체를 중단한다.
+            logger.warning("stt_context_failed", error_type=type(error).__name__)
+            return
+        if not context:
+            logger.info("stt_context_skipped")
+            return
+        await self._stt_ready.wait()
+        try:
+            async with asyncio.timeout(STT_SEND_TIMEOUT):
+                await self._stt_client.update_context(context)
+        except Exception as error:
+            self._on_error(error)
+            return
+        logger.info("stt_context_applied", context_length=len(context))
 
     async def _forward_transcripts(self, event: SessionStart) -> None:
         try:
