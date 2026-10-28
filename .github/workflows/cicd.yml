@@ -40,12 +40,12 @@ jobs:
     timeout-minutes: 20
     # 같은 Workspace 안에서 운영과 스테이징의 Modal Environment를 분리한다.
     environment:
-      name: ${{ github.ref_name == 'dev' && 'staging' || 'production' }}
+      name: ${{ github.ref_name == 'dev' && 'v2-staging' || 'production' }}
     concurrency:
       group: deploy-modal-${{ github.ref_name }}
       cancel-in-progress: false
     env:
-      DEPLOY_ENV: ${{ github.ref_name == 'dev' && 'staging' || 'production' }}
+      DEPLOY_ENV: ${{ github.ref_name == 'dev' && 'v2-staging' || 'production' }}
       MODAL_ENVIRONMENT: ${{ github.ref_name == 'dev' && 'staging' || 'main' }}
       MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
