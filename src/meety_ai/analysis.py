@@ -1,4 +1,4 @@
-"""분석 앱을 조립하고 챗봇·요약·화자 분리 HTTP 요청을 처리한다."""
+"""분석 앱을 조립하고 챗봇·요약·화자 분리·화자 임베딩 HTTP 요청을 처리한다."""
 
 import os
 from collections.abc import AsyncGenerator
@@ -15,6 +15,7 @@ from meety_ai.diarization.router import diarization_router
 from meety_ai.metric.chain import create_metric_chain
 from meety_ai.metric.router import metric_router
 from meety_ai.settings import AnalysisSettings
+from meety_ai.speaker_embedding.router import speaker_embedding_router
 from meety_ai.summary.chain import create_summary_chain
 from meety_ai.summary.router import summary_router
 
@@ -63,4 +64,5 @@ def create_analysis_app() -> FastAPI:
     app.include_router(summary_router)
     app.include_router(diarization_router)
     app.include_router(metric_router)
+    app.include_router(speaker_embedding_router)
     return app
