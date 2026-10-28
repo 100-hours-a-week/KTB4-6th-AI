@@ -20,6 +20,10 @@ class STTClient(Protocol):
         """16 kHz mono pcm_s16le 청크를 전송한다."""
         ...
 
+    async def update_context(self, context: str) -> None:
+        """이후 전사에 사용할 맥락을 교체한다. 이미 확정된 전사는 바꾸지 않는다."""
+        ...
+
     async def finish(self) -> None:
         """입력 종료를 알리고 마지막 확정 전사 콜백까지 기다린다."""
         ...

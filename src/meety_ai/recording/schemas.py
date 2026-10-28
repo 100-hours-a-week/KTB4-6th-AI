@@ -19,6 +19,8 @@ class SessionStart(Message):
     # ponytail: BE 문자열 ID 송신이 변경되면 strict=False를 제거한다(AI #77).
     meeting_id: MeetingId = Field(strict=False)
     recording_session_id: RecordingSessionId = Field(strict=False)
+    # BE가 보내기 전까지는 과거 회의 조회 없이 STT 맥락을 만든다(BE #372).
+    team_id: NonNegativeInt | None = None
     participant_count: NonNegativeInt
     participants: list[SessionParticipant]
     start_sequence: NonNegativeInt = Field(
