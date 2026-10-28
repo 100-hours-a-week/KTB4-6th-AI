@@ -7,6 +7,7 @@ from websockets.asyncio.client import connect
 
 from meety_ai.modal_app.stt.protocol import (
     MAX_AUDIO_MESSAGE_BYTES,
+    ContextUpdate,
     PipelineFailure,
     SegmentCommitted,
     SegmentFailed,
@@ -150,6 +151,10 @@ class ModalSTTClient:
         await self._receiver
         if self._error is not None or not self._ended:
             raise self._report_error()
+
+    async def update_context(self, context: str) -> None:
+        message = ContextUpdate(type="context.update", context=context)
+        await self._send(message.model_dump_json(by_alias=True))
 
     async def close(self) -> None:
         self._closing = True

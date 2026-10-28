@@ -25,6 +25,14 @@ class SessionStop(Message):
     type: Literal["session.stop"]
 
 
+class ContextUpdate(Message):
+    type: Literal["context.update"]
+    context: str = Field(max_length=800)
+
+
+control_adapter = TypeAdapter(Annotated[SessionStop | ContextUpdate, Field(discriminator="type")])
+
+
 class SessionReady(Message):
     type: Literal["session.ready"]
     metadata: dict
