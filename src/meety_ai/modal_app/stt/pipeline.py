@@ -12,6 +12,7 @@ import select
 import subprocess
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,6 +28,7 @@ from meety_ai.modal_app.stt.protocol import (
     SessionStart,
     control_adapter,
 )
+from meety_ai.modal_app.stt.speaker_mapping import SpeakerMapper
 
 logger = logging.getLogger(__name__)
 ASR_MODEL = "TeamUNIVA/qwen3_asr_1.7b_ko"
@@ -40,6 +42,11 @@ QUEUE_WAIT_SECONDS = 5
 SEND_TIMEOUT_SECONDS = 10
 DRAIN_TIMEOUT_SECONDS = 30
 MODEL_TIMEOUT_SECONDS = 30
+# 화자 벡터는 CPU 4코어를 vLLM·Nemotron과 나누지 않도록 GPU에서 추출한다.
+EMBEDDING_DEVICE = "cuda"
+# shortcut: GPU 추출 측정 전 초기값이다. 구간 제출 후 이 시간이 지나면 화자를 보류하고
+# 늦은 벡터는 버린다. 추출이 밀려도 결과 전송을 막지 않도록 제출 시점부터 잰다.
+EMBEDDING_WAIT_SECONDS = 10
 
 
 class PipelineError(Exception):
@@ -76,6 +83,23 @@ class PipelineSession:
         self.runtime, self.start = runtime, start
         self.context = start.context
         self.key = uuid.uuid4().hex
+        # 지원하는 모델 버전의 등록 벡터만 이 회의의 비교 후보로 쓴다.
+        self.mapper = SpeakerMapper(
+            {
+                profile.team_member_id: profile.speaker_embedding.embedding
+                for profile in start.speaker_profiles
+                if runtime.embedding_version is not None
+                and profile.speaker_embedding.model_version == runtime.embedding_version
+            }
+        )
+        if start.speaker_profiles:
+            logger.info(
+                "speaker_profiles meetingId=%s recordingSessionId=%s total=%s compatible=%s",
+                start.meeting_id,
+                start.recording_session_id,
+                len(start.speaker_profiles),
+                len(self.mapper.profiles),
+            )
         self.pcm = bytearray()
         self.base_sample = self.total_bytes = self.next_sample = self.frames = self.mel_cursor = 0
         self.open_turns: dict[int, int] = {}
@@ -85,6 +109,8 @@ class PipelineSession:
         self.failure: str | None = None
         self.segments = self.pending_jobs = self.succeeded = self.failed = 0
         self.results: asyncio.Queue[dict | None] = asyncio.Queue(maxsize=32)
+        # segmentId별 화자 벡터 추출 작업, 제출 구간 길이(초), 대기 마감 시각이다.
+        self.embeddings: dict[int, tuple[asyncio.Future, float, float]] = {}
         self.drained = asyncio.Event()
         self.drained.set()
 
@@ -190,6 +216,16 @@ class PipelineSession:
             self._slice(lower, upper),
             time.perf_counter(),
         )
+        if self.mapper.enabled:
+            # ASR 대기와 겹치도록 구간을 닫는 즉시 같은 PCM으로 화자 벡터 추출을 시작한다.
+            loop = asyncio.get_running_loop()
+            self.embeddings[job.segment_id] = (
+                loop.run_in_executor(
+                    self.runtime.embed_pool, self.runtime.embed_segment, self, job.pcm
+                ),
+                (upper - lower) / SAMPLE_RATE,
+                loop.time() + EMBEDDING_WAIT_SECONDS,
+            )
         self.pending_jobs += 1
         self.drained.clear()
         try:
@@ -199,6 +235,39 @@ class PipelineSession:
             self.job_done()
             raise
         self.segments += 1
+
+    async def attribute(self, message: dict) -> list[dict]:
+        """결과 큐 순서대로 화자 근거를 누적하고, 매핑 변경을 해당 전사보다 먼저 보낸다."""
+        embedding = self.embeddings.pop(message.get("segmentId"), None)
+        if message["type"] != "segment.committed" or not self.mapper.enabled:
+            # 빈 전사 구간은 화자 근거로 누적하지 않으며, 아직 시작 전인 추출은 건너뛴다.
+            if embedding is not None:
+                embedding[0].cancel()
+            return [message]
+        vector, seconds = None, 0.0
+        if embedding is not None:
+            future, seconds, deadline = embedding
+            timings = message.setdefault("timings", {})
+            try:
+                async with asyncio.timeout_at(deadline):
+                    vector, timings["embeddingSeconds"] = await future
+            except TimeoutError:
+                timings["embeddingTimedOut"] = True
+                logger.warning(
+                    "speaker_embedding_timeout meetingId=%s recordingSessionId=%s segmentId=%s",
+                    self.start.meeting_id,
+                    self.start.recording_session_id,
+                    message["segmentId"],
+                )
+        speaker, mappings = self.mapper.observe(message["speakerId"], vector, seconds)
+        message["speakerId"] = speaker
+        if mappings is None:
+            return [message]
+        update = {
+            "type": "speaker.mapping.updated",
+            "mappings": [{"speakerId": slot, "teamMemberId": member} for slot, member in mappings],
+        }
+        return [update, message]
 
     def job_done(self) -> None:
         self.pending_jobs -= 1
@@ -235,6 +304,10 @@ class PipelineSession:
 
 
 class InferenceRuntime:
+    # 화자 벡터 모델을 불러오지 못하면 None이며, 전사는 익명 화자로 계속한다.
+    embedding_version: str | None = None
+    embed_pool: ThreadPoolExecutor | None = None
+
     def __init__(self):
         from huggingface_hub import snapshot_download
         from qwen_asr import Qwen3ASRModel
@@ -276,7 +349,12 @@ class InferenceRuntime:
                 "geometry": self.geometry,
                 "sourceSha256": {
                     name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
-                    for name in ("pipeline.py", "nemotron_worker.py", "protocol.py")
+                    for name in (
+                        "pipeline.py",
+                        "nemotron_worker.py",
+                        "protocol.py",
+                        "speaker_mapping.py",
+                    )
                 },
                 "versions": {
                     name: importlib.metadata.version(name)
@@ -296,6 +374,14 @@ class InferenceRuntime:
                 return outputs
 
             self.asr.model.generate = capture_generate
+            try:
+                from meety_ai.modal_app import redimnet
+
+                redimnet.load_model(EMBEDDING_DEVICE)
+                self.embedding_version = redimnet.MODEL_VERSION
+            except Exception as error:
+                logger.error("speaker_embedding_unavailable error_type=%s", type(error).__name__)
+            self.metadata["speakerEmbeddingModel"] = self.embedding_version
         except BaseException:
             self.close()
             raise
@@ -308,6 +394,30 @@ class InferenceRuntime:
         self.failed_event = asyncio.Event()
         self.failure: str | None = None
         self.asr_task = None
+        # shortcut: GPU 추출을 직렬 1개로 실행하며, 측정에서 지연이 쌓이면 worker 수를 늘린다.
+        self.embed_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="speaker-embedding")
+
+    def embed(self, pcm: bytes) -> list[float]:
+        import numpy as np
+
+        from meety_ai.modal_app import redimnet
+
+        waveform = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
+        return redimnet.embed(waveform, device=EMBEDDING_DEVICE)
+
+    def embed_segment(
+        self, session: "PipelineSession", pcm: bytes
+    ) -> tuple[list[float] | None, float]:
+        """벡터와 추출 시간(초)을 반환한다. 실패한 구간은 None으로 해당 전사의 화자만 보류한다."""
+        started = time.perf_counter()
+        if session.aborted:
+            return None, 0.0
+        try:
+            return self.embed(pcm), time.perf_counter() - started
+        except Exception as error:
+            # 음성·벡터 원문 대신 예외 타입만 남긴다.
+            logger.warning("speaker_embedding_failed error_type=%s", type(error).__name__)
+            return None, time.perf_counter() - started
 
     def _read_response(self, timeout: float) -> dict:
         if not select.select([self.proc.stdout], [], [], timeout)[0]:
@@ -502,6 +612,7 @@ class InferenceRuntime:
         session.pcm.clear()
         session.open_turns.clear()
         session.pending_ends.clear()
+        session.embeddings.clear()
         while not session.results.empty():
             session.results.get_nowait()
         retained = []
@@ -521,6 +632,8 @@ class InferenceRuntime:
     def close(self) -> None:
         if self.asr_task is not None:
             self.asr_task.get_loop().call_soon_threadsafe(self.asr_task.cancel)
+        if self.embed_pool is not None:
+            self.embed_pool.shutdown(wait=False, cancel_futures=True)
         if self.proc is not None and self.proc.poll() is None:
             self.proc.terminate()
             try:
@@ -590,10 +703,11 @@ def create_inference_app(runtime: InferenceRuntime) -> FastAPI:
                         return
 
             async def emit() -> None:
-                while (message := await session.results.get()) is not None:
+                while (result := await session.results.get()) is not None:
                     if session.failure:
                         raise PipelineError(session.failure)
-                    await send(websocket, message)
+                    for message in await session.attribute(result):
+                        await send(websocket, message)
 
             tasks = [
                 asyncio.create_task(ingest()),

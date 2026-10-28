@@ -5,10 +5,11 @@ from typing import Annotated, Literal
 from pydantic import Field, TypeAdapter, model_validator
 
 from meety_ai.core.schemas import MeetingId, Message, NonNegativeInt, RecordingSessionId
+from meety_ai.stt.schemas import SpeakerMapping, SpeakerProfile
 
 SAMPLE_RATE = 16000
 MAX_AUDIO_MESSAGE_BYTES = 256 * 1024
-MAX_TEXT_MESSAGE_BYTES = 16 * 1024
+MAX_TEXT_MESSAGE_BYTES = 64 * 1024
 
 
 class SessionStart(Message):
@@ -16,6 +17,7 @@ class SessionStart(Message):
     meeting_id: MeetingId
     recording_session_id: RecordingSessionId
     context: str = Field(default="", max_length=3000)
+    speaker_profiles: list[SpeakerProfile] = []
     audio_format: Literal["pcm_s16le"] = "pcm_s16le"
     sample_rate_hz: Literal[16000] = SAMPLE_RATE
     channels: Literal[1] = 1
@@ -84,6 +86,11 @@ class SessionEnded(Message):
     unscored_tail_samples: NonNegativeInt
 
 
+class SpeakerMappingUpdated(Message):
+    type: Literal["speaker.mapping.updated"]
+    mappings: list[SpeakerMapping]
+
+
 class PipelineFailure(Message):
     type: Literal["error"]
     code: str
@@ -91,7 +98,12 @@ class PipelineFailure(Message):
 
 result_adapter = TypeAdapter(
     Annotated[
-        SessionReady | SegmentCommitted | SegmentFailed | SessionEnded | PipelineFailure,
+        SessionReady
+        | SegmentCommitted
+        | SegmentFailed
+        | SpeakerMappingUpdated
+        | SessionEnded
+        | PipelineFailure,
         Field(discriminator="type"),
     ]
 )

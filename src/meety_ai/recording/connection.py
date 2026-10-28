@@ -24,11 +24,12 @@ from meety_ai.recording.schemas import (
 from meety_ai.recording.session import RecordingSession, SessionProtocolError
 from meety_ai.recording.transcript import TranscriptQueue, send_message, send_transcripts
 from meety_ai.stt.client import STTClient, STTProviderError
-from meety_ai.stt.schemas import STTTranscript
+from meety_ai.stt.schemas import SpeakerProfile, STTSpeakerMapping, STTTranscript
 
 logger = structlog.stdlib.get_logger(__name__)
 
-MAX_TEXT_SIZE = 16 * 1024
+# 참가자별 192차원 등록 벡터를 포함한 시작 메시지를 받는다.
+MAX_TEXT_SIZE = 64 * 1024
 BINARY_WAIT_TIMEOUT = 10
 STT_STOP_TIMEOUT = 30
 STT_SEND_TIMEOUT = 10
@@ -257,6 +258,14 @@ class RecordingConnection:
                 meeting_id=event.meeting_id,
                 recording_session_id=event.recording_session_id,
                 context=context,
+                profiles=[
+                    SpeakerProfile(
+                        team_member_id=participant.team_member_id,
+                        speaker_embedding=participant.speaker_embedding,
+                    )
+                    for participant in event.participants
+                    if participant.speaker_embedding is not None
+                ],
             )
             logger.info("stt_ready", buffered_audio_bytes=self._pending_audio_bytes)
             self._stt_ready.set()
@@ -303,9 +312,11 @@ class RecordingConnection:
         except Exception as error:
             self._on_error(error)
 
-    def _on_transcript(self, message: STTTranscript) -> None:
+    def _on_transcript(self, message: STTTranscript | STTSpeakerMapping) -> None:
         if self._resumed:
-            # shortcut: cache 복구 전에는 재연결 후 화자를 null로 전달한다.
+            # shortcut: cache 복구 전에는 재연결 후 화자를 null로 전달하고 매핑은 보내지 않는다.
+            if isinstance(message, STTSpeakerMapping):
+                return
             message = message.model_copy(update={"speaker_id": None})
         self._transcript_queue.put_nowait(message)
 

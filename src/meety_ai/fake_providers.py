@@ -7,7 +7,7 @@
 """
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from functools import partial
 from typing import Any
 
@@ -19,7 +19,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from meety_ai import analysis, live
 from meety_ai.metric.schemas import MetricClassification
-from meety_ai.stt.schemas import STTTranscript
+from meety_ai.stt.schemas import SpeakerProfile, STTTranscript
 from meety_ai.summary.chain import create_summary_chain
 
 # 16 kHz mono pcm_s16le 1초 분량.
@@ -43,7 +43,12 @@ class FakeSpeechmaticsClient:
         self._pending: set[asyncio.Task[None]] = set()
 
     async def start(
-        self, *, meeting_id: int = 0, recording_session_id: int = 0, context: str = ""
+        self,
+        *,
+        meeting_id: int = 0,
+        recording_session_id: int = 0,
+        context: str = "",
+        profiles: Sequence[SpeakerProfile] = (),
     ) -> None:
         await asyncio.sleep(self._latency)
 
