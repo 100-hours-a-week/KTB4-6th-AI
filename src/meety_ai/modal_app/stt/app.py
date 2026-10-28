@@ -5,20 +5,26 @@ import uuid
 
 import modal
 
+from meety_ai.modal_app.redimnet import PACKAGE, WEIGHTS_COMMANDS
 from meety_ai.modal_app.stt.pipeline import MAX_SESSIONS
 
 app = modal.App("meety-realtime-stt")
 cache = modal.Volume.from_name("meety-stt-learning-model-cache", create_if_missing=True)
 image = (
     modal.Image.from_registry("nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04", add_python="3.12")
-    .apt_install("ffmpeg", "libsndfile1", "git")
+    .apt_install("ffmpeg", "libsndfile1", "git", "curl")
     .uv_pip_install(
         "qwen-asr[vllm]==0.0.6",
         "vllm==0.14.0",
         "torch==2.9.1",
         "transformers==4.57.6",
         "fastapi==0.141.1",
+        # ReDimNet2+ 저자 코드가 import 시점에 hydra를 쓴다. torchaudio·scipy는 기존 버전을 쓴다.
+        "hydra-core==1.3.8",
+        "omegaconf==2.3.1",
     )
+    .uv_pip_install(PACKAGE, extra_options="--no-deps")
+    .run_commands(*WEIGHTS_COMMANDS)
     .run_commands(
         "python -m venv /opt/nemotron --system-site-packages",
         "/opt/nemotron/bin/python -m pip install "

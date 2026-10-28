@@ -1,6 +1,9 @@
 """STT 공급자가 구현할 공통 수명주기와 오류를 정의한다."""
 
+from collections.abc import Sequence
 from typing import Protocol
+
+from meety_ai.stt.schemas import SpeakerProfile
 
 
 class STTProviderError(Exception):
@@ -8,12 +11,17 @@ class STTProviderError(Exception):
 
 
 class STTClient(Protocol):
-    """구현 클래스는 연결 설정과 STTTranscript를 전달할 콜백을 받는다."""
+    """구현 클래스는 연결 설정과 STTTranscript·STTSpeakerMapping을 전달할 콜백을 받는다."""
 
     async def start(
-        self, *, meeting_id: int = 0, recording_session_id: int = 0, context: str = ""
+        self,
+        *,
+        meeting_id: int = 0,
+        recording_session_id: int = 0,
+        context: str = "",
+        profiles: Sequence[SpeakerProfile] = (),
     ) -> None:
-        """오디오를 전송할 수 있도록 전사 세션을 시작한다."""
+        """오디오를 전송할 수 있도록 전사 세션을 시작한다. 등록 벡터를 안 쓰는 공급자는 무시한다."""
         ...
 
     async def send_audio(self, chunk: bytes) -> None:
