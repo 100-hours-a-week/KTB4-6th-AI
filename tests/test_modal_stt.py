@@ -688,6 +688,76 @@ async def test_exclusive_turns_do_not_merge_across_another_speaker():
     assert not runtime.sessions
 
 
+# 테스트 이름: test_short_other_speaker_merges_surrounding_turns
+# 목적: 500ms 미만의 다른 화자가 끼어든 A→B→A를 A 한 구간으로 전사해 발언이 잘게 나뉘지 않게 한다.
+# 준비: A 0~1초, B 1~1.3초, A 1.3초~의 배타적 활동과 실제 PipelineSession, ASR 대역.
+# 실행: A 복귀를 1초 이내·초과로 바꿔 PCM을 공급하고 EOF까지 처리한다.
+# 기대 결과: 1초 이내 복귀는 A 0~3초 한 전사와 PCM 전체 1회 입력, 초과 복귀는 앞뒤 A가 분리된다.
+# 실패 조건: A가 둘로 나뉘거나, B가 따로 전사되거나, PCM이 중복 전달되거나, 늦은 복귀까지 병합된다.
+@pytest.mark.parametrize("silence_frames", [0, 80])
+async def test_short_other_speaker_merges_surrounding_turns(silence_frames):
+    class Runtime(InferenceRuntime):
+        def __init__(self):
+            self.geometry = {
+                "first_samples": 16000,
+                "chunk_samples": 16000,
+                "frame_samples": 160,
+                "mel_step": 100,
+            }
+            self.calls = []
+            self.start_runtime()
+
+        async def diarize(self, session, pcm, *, last):
+            def speaker(frame):
+                if 100 <= frame < 130:
+                    return 1
+                if 130 <= frame < 130 + silence_frames:
+                    return None
+                return 0
+
+            return {
+                "active": [
+                    [int(i == speaker(frame)) for i in range(8)]
+                    for frame in range(session.frames, session.frames + len(pcm) // 320)
+                ],
+                "next_start": session.next_sample + len(pcm) // 2,
+            }
+
+        def _transcribe(self, jobs):
+            self.calls.extend(job.pcm for job in jobs)
+            return [(f"화자 {job.speaker}의 발언", None) for job in jobs]
+
+        async def _call_worker(self, request):
+            return {"released": True}
+
+    runtime = Runtime()
+    session = runtime.open(SessionStart(type="session.start", meeting_id=1, recording_session_id=1))
+    total_ms = 3000 + silence_frames * 10
+    pcm = bytes(range(256)) * (total_ms * 32 // 256)
+    try:
+        async with asyncio.timeout(5):
+            await session.feed(pcm)
+            await session.finish()
+            results = []
+            while (event := await session.results.get()) is not None:
+                results.append(event)
+        committed = [event for event in results if event["type"] == "segment.committed"]
+        spans = [
+            (event["speakerId"], event["startedAtMs"], event["endedAtMs"]) for event in committed
+        ]
+        if silence_frames:
+            assert spans == [(0, 0, 1000), (0, 1300 + silence_frames * 10, total_ms)]
+        else:
+            assert spans == [(0, 0, 3000)]
+            assert runtime.calls == [pcm]
+        assert results[-1]["succeededSegments"] == len(committed)
+        assert results[-1]["failedSegments"] == 0
+    finally:
+        await runtime.release(session)
+        runtime.asr_task.cancel()
+        await asyncio.gather(runtime.asr_task, return_exceptions=True)
+
+
 # 테스트 이름: test_speaker_mapping_links_enrolled_speaker_and_holds_mismatched_segment
 # 목적: 등록자·미등록자가 섞인 회의에서 미연결→이름 연결→불일치 구간 보류의 BE 전달 순서를 보호한다.
 # 준비: 실제 Live 앱·Modal adapter·파이프라인을 연결하고 화자 분리·ASR·화자 벡터 추출만 대체한다.
