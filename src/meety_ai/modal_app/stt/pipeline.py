@@ -143,6 +143,12 @@ class PipelineSession:
                 return
 
     async def _activity(self, row: list[int], lower: int, upper: int) -> None:
+        if any(row):
+            for speaker in list(self.open_turns):
+                if not row[speaker]:
+                    await self._close_turn(
+                        speaker, self.pending_ends.get(speaker, lower), "speaker_change"
+                    )
         for speaker, enabled in enumerate(row):
             if enabled:
                 self.pending_ends.pop(speaker, None)
