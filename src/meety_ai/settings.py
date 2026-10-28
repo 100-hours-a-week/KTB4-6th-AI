@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     chat_timeout_seconds: float = Field(default=60.0, gt=0)
 
     summary_model: str = "openai/gpt-6-luna"
-    summary_timeout_seconds: float = Field(default=120.0, gt=0)
+    summary_timeout_seconds: float = Field(default=180.0, gt=0)
     # Modal 함수 자체 제한(3600초)과 맞춘 SDK 호출 대기 시간이다.
     diarization_timeout_seconds: float = Field(default=3600.0, gt=0)
 
