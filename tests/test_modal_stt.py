@@ -500,3 +500,189 @@ async def test_same_speaker_turns_merge_within_one_second(gap_frames):
 # 실행: 두 연결에 구분되는 PCM을 동시에 보내고 첫 회의 종료 후 두 번째 회의 입력을 이어간다.
 # 기대 결과: 전사·화자·시간축이 회의별로 유지되고 각 연결은 최종 전사 후 정상 종료된다.
 # 실패 조건: 두 번째 회의를 거절하거나 결과가 섞이거나 첫 회의 정리가 다른 회의를 중단한다.
+async def test_modal_concurrent_sessions_keep_transcripts_separate():
+    class Runtime(InferenceRuntime):
+        def __init__(self):
+            self.geometry = {
+                "first_samples": 16000,
+                "chunk_samples": 16000,
+                "frame_samples": 160,
+                "mel_step": 100,
+            }
+            self.metadata = {"test": True}
+            self.audio = {}
+            self.start_runtime()
+
+        async def diarize(self, session, pcm, *, last):
+            self.audio.setdefault(session.start.meeting_id, []).append(pcm)
+            speaker = pcm[0] - 1
+            return {
+                "active": [
+                    [int(frame % 300 < 100 and i == speaker) for i in range(8)]
+                    for frame in range(session.frames, session.frames + len(pcm) // 320)
+                ],
+                "next_start": session.next_sample + len(pcm) // 2,
+            }
+
+        def _transcribe(self, jobs):
+            return [(f"{job.session.context} 입력 {job.pcm[0]}", None) for job in jobs]
+
+        async def _call_worker(self, request):
+            return {"released": True}
+
+    runtime = Runtime()
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+    server = uvicorn.Server(
+        uvicorn.Config(create_inference_app(runtime), log_level="error", lifespan="off")
+    )
+    serving = asyncio.create_task(server.serve(sockets=[listener]))
+    transcripts = [asyncio.Queue(), asyncio.Queue()]
+    errors = []
+    clients = [
+        adapter_module.ModalSTTClient(
+            f"ws://127.0.0.1:{port}/transcribe", "test", "test", queue.put_nowait, errors.append
+        )
+        for queue in transcripts
+    ]
+    first_pcm, other_pcm = b"\x01" * 96000, b"\x02" * 96000
+
+    async def wait_until(predicate):
+        async with asyncio.timeout(5):
+            while not predicate():
+                await asyncio.sleep(0.01)
+
+    try:
+        async with asyncio.timeout(10):
+            await wait_until(lambda: server.started)
+            await asyncio.gather(
+                clients[0].start(meeting_id=1, recording_session_id=1, context="첫 회의"),
+                clients[1].start(meeting_id=2, recording_session_id=2, context="다른 회의"),
+            )
+            sessions = {session.start.meeting_id: session for session in runtime.sessions.values()}
+            assert set(sessions) == {1, 2}
+            assert sessions[1].key != sessions[2].key
+            await asyncio.gather(clients[0].send_audio(first_pcm), clients[1].send_audio(other_pcm))
+            first, other = await asyncio.gather(*(queue.get() for queue in transcripts))
+            assert (first.content, first.speaker_id, first.started_at_ms, first.ended_at_ms) == (
+                "첫 회의 입력 1",
+                0,
+                0,
+                1000,
+            )
+            assert (other.content, other.speaker_id, other.started_at_ms, other.ended_at_ms) == (
+                "다른 회의 입력 2",
+                1,
+                0,
+                1000,
+            )
+            await clients[0].finish()
+            await wait_until(lambda: sessions[1].key not in runtime.sessions)
+            assert runtime.sessions == {sessions[2].key: sessions[2]}
+            await clients[1].send_audio(other_pcm)
+            continued = await transcripts[1].get()
+            assert (
+                continued.content,
+                continued.speaker_id,
+                continued.started_at_ms,
+                continued.ended_at_ms,
+            ) == ("다른 회의 입력 2", 1, 3000, 4000)
+            await clients[1].send_audio(other_pcm[:32000])
+            await clients[1].finish()
+            tail = await transcripts[1].get()
+            assert (tail.content, tail.speaker_id, tail.started_at_ms, tail.ended_at_ms) == (
+                "다른 회의 입력 2",
+                1,
+                6000,
+                7000,
+            )
+            await wait_until(lambda: not runtime.sessions)
+            assert b"".join(runtime.audio[1]) == first_pcm
+            assert b"".join(runtime.audio[2]) == other_pcm * 2 + other_pcm[:32000]
+            assert all(queue.empty() for queue in transcripts)
+            assert runtime.asr_queue.empty()
+            assert all(session.pending_jobs == 0 for session in sessions.values())
+            assert not errors
+    finally:
+        for client in clients:
+            await client.close()
+        server.should_exit = True
+        await asyncio.wait_for(serving, timeout=5)
+        listener.close()
+        if runtime.asr_task is not None:
+            runtime.asr_task.cancel()
+            await asyncio.gather(runtime.asr_task, return_exceptions=True)
+
+
+# 테스트 이름: test_exclusive_turns_do_not_merge_across_another_speaker
+# 목적: 짧은 화자 전환을 가로질러 같은 PCM을 중복 전사하는 회귀를 막는다.
+# 준비: A 0~1초, B 1~1.6초, A 1.6~3초의 배타적 활동과 실제 PipelineSession.
+# 실행: 음성을 공급하고 EOF까지 처리한다.
+# 기대 결과: ASR 입력은 A 0~1초, B 1~1.6초, A 1.6~3초이며 서로 겹치지 않는다.
+# 실패 조건: A를 0~3초로 병합하거나 B의 입력이 다른 구간에 다시 포함된다.
+async def test_exclusive_turns_do_not_merge_across_another_speaker():
+    class Runtime(InferenceRuntime):
+        def __init__(self):
+            self.geometry = {
+                "first_samples": 16000,
+                "chunk_samples": 16000,
+                "frame_samples": 160,
+                "mel_step": 100,
+            }
+            self.calls = []
+            self.start_runtime()
+
+        async def diarize(self, session, pcm, *, last):
+            return {
+                "active": [
+                    [int(i == (1 if 100 <= frame < 160 else 0)) for i in range(8)]
+                    for frame in range(session.frames, session.frames + len(pcm) // 320)
+                ],
+                "next_start": session.next_sample + len(pcm) // 2,
+            }
+
+        def _transcribe(self, jobs):
+            self.calls.extend(job.pcm for job in jobs)
+            return [(f"화자 {job.speaker}의 발언", None) for job in jobs]
+
+        async def _call_worker(self, request):
+            return {"released": True}
+
+    runtime = Runtime()
+    session = runtime.open(SessionStart(type="session.start", meeting_id=1, recording_session_id=1))
+    pcm = b"\x01" * 32000 + b"\x02" * 19200 + b"\x03" * 44800
+    try:
+        async with asyncio.timeout(5):
+            await session.feed(pcm)
+            await session.finish()
+            results = []
+            while (event := await session.results.get()) is not None:
+                results.append(event)
+            committed = [event for event in results if event["type"] == "segment.committed"]
+            assert [
+                (event["segmentId"], event["speakerId"], event["startedAtMs"], event["endedAtMs"])
+                for event in committed
+            ] == [(0, 0, 0, 1000), (1, 1, 1000, 1600), (2, 0, 1600, 3000)]
+            assert [event["content"] for event in committed] == [
+                "화자 0의 발언",
+                "화자 1의 발언",
+                "화자 0의 발언",
+            ]
+            assert runtime.calls == [
+                pcm[:32000],
+                pcm[32000:51200],
+                pcm[51200:],
+            ]
+            assert [event["type"] for event in results] == ["segment.committed"] * 3 + [
+                "session.ended"
+            ]
+            assert results[-1]["succeededSegments"] == 3
+            assert results[-1]["failedSegments"] == 0
+            assert results[-1]["audioDurationMs"] == 3000
+            assert session.pending_jobs == 0
+    finally:
+        await runtime.release(session)
+        runtime.asr_task.cancel()
+        await asyncio.gather(runtime.asr_task, return_exceptions=True)
+    assert not runtime.sessions

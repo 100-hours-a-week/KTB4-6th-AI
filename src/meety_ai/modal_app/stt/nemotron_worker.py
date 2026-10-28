@@ -75,8 +75,12 @@ def main(output):
                     raise RuntimeError("Nemotron 중간 청크의 캐시가 없습니다.")
                 else:
                     caches[key] = result.speaker_cache
+                probabilities = result.logits[0].sigmoid()
+                confidence, speaker = probabilities.max(dim=-1)
+                active = torch.zeros_like(probabilities, dtype=torch.uint8)
+                active.scatter_(1, speaker[:, None], (confidence > 0.5).to(torch.uint8)[:, None])
                 response = {
-                    "active": (result.logits[0].sigmoid() > 0.5).to(torch.uint8).cpu().tolist(),
+                    "active": active.cpu().tolist(),
                     "next_start": processor.audio_chunk_start(
                         request["mel_cursor"] + geometry["mel_step"]
                     ),
