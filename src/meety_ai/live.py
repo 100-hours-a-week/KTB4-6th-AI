@@ -22,13 +22,6 @@ def create_live_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         async with common_lifespan(app):
-            app.state.stt_context_model = ChatOpenAI(
-                model=settings.stt_context_model,
-                api_key=settings.openrouter_api_key,
-                base_url="https://openrouter.ai/api/v1",
-                timeout=settings.stt_context_timeout_seconds,
-                max_retries=0,
-            )
             async with httpx.AsyncClient(
                 base_url=settings.backend_base_url,
                 headers={"X-Internal-Api-Key": settings.internal_api_key.get_secret_value()},
@@ -38,6 +31,13 @@ def create_live_app() -> FastAPI:
                 yield
 
     app.router.lifespan_context = lifespan
+    app.state.stt_context_model = ChatOpenAI(
+        model=settings.stt_context_model,
+        api_key=settings.openrouter_api_key,
+        base_url="https://openrouter.ai/api/v1",
+        timeout=settings.stt_context_timeout_seconds,
+        max_retries=0,
+    )
     app.include_router(recording_router)
 
     app.state.recording_connections = 0

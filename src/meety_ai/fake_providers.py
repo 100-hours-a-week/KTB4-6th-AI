@@ -66,6 +66,9 @@ class FakeSpeechmaticsClient:
             self._pending.add(task)
             task.add_done_callback(self._pending.discard)
 
+    async def update_context(self, context: str) -> None:
+        await asyncio.sleep(self._latency)
+
     async def finish(self) -> None:
         # 지연 중인 전사가 모두 큐에 들어간 뒤 종료를 알린다.
         await asyncio.gather(*self._pending)
@@ -88,8 +91,8 @@ async def fake_diarize(
     ]
 
 
-def fake_chat_model(latency_seconds: float) -> Runnable:
-    """고정 요약을 돌려주는 가짜 LLM.
+def fake_chat_model(latency_seconds: float, content: str = FAKE_SUMMARY) -> Runnable:
+    """고정 응답을 돌려주는 가짜 LLM.
 
     FakeListChatModel은 비동기 호출에서도 time.sleep을 스레드풀에서 실행해
     동시 요청 수가 스레드 수에 묶이므로 asyncio.sleep으로 직접 지연한다.
@@ -97,7 +100,7 @@ def fake_chat_model(latency_seconds: float) -> Runnable:
 
     async def respond(prompt: Any) -> AIMessage:
         await asyncio.sleep(latency_seconds)
-        return AIMessage(content=FAKE_SUMMARY)
+        return AIMessage(content=content)
 
     return RunnableLambda(respond)
 
@@ -126,6 +129,10 @@ def create_live_app() -> FastAPI:
     latency = FakeLatencySettings()
     app.state.stt_client_factory = partial(
         FakeSpeechmaticsClient, latency_seconds=latency.stt_latency_ms / 1000
+    )
+    # 선택 단계는 관련 회의 없음으로 처리하고, 생성 단계는 같은 문자열을 맥락으로 전달한다.
+    app.state.stt_context_model = fake_chat_model(
+        latency.summary_latency_ms / 1000, content='{"meetingIds": []}'
     )
     return app
 
