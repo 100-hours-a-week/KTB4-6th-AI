@@ -901,11 +901,13 @@ def test_speaker_mapping_links_enrolled_speaker_and_holds_mismatched_segment(mon
 
 # 테스트 이름: test_context_echo_and_overlong_text_fail_segment_but_keep_real_speech
 # 목적: 무음 구간에서 ASR이 회의 맥락을 복사하거나 음성 길이로 말할 수 없는 분량을 출력하면
-#       확정 전사로 노출되지 않게 보호한다(#135).
-# 준비: 여러 줄 맥락. 0.72초 구간의 문장부호만 바꾼 맥락 전문 출력과 맥락 앞부분만 복사한 출력,
-#       맥락 단어가 섞인 짧은 발화, 정상 속도로 맥락 한 줄을 그대로 읽은 긴 발화 출력.
+#       확정 전사로 노출되지 않게 보호한다(#135, #140).
+# 준비: 여러 줄 맥락. 0.72초 구간의 문장부호만 바꾼 맥락 전문 출력, 5초 구간의 줄을 걸친 맥락 일부
+#       복사 출력, 0.72초 구간의 맥락에 없는 반복 출력, 맥락 단어가 섞인 짧은 발화,
+#       정상 속도로 맥락 한 줄을 인용한 긴 발화 출력.
 # 실행: pipeline._failure_code(출력, 맥락, 구간 초, "stop")을 각 출력에 호출한다.
-# 기대 결과: 전문 복사는 "context_echo", 일부 복사는 "text_rate_exceeded", 실제 발화 두 개는 None.
+# 기대 결과: 전문·일부 복사는 "context_echo", 반복 출력은 "text_rate_exceeded",
+#           실제 발화 두 개는 None.
 # 실패 조건: 맥락 복사·과생성이 정상 전사로 통과하거나, 맥락을 인용한 정상 발화가 버려질 때.
 def test_context_echo_and_overlong_text_fail_segment_but_keep_real_speech():
     context = "\n".join(
@@ -920,6 +922,9 @@ def test_context_echo_and_overlong_text_fail_segment_but_keep_real_speech():
     quote = "오늘 안건은 무음 구간 처리 기준, 회의 요약 품질 지표, 다음 스프린트 일정 확정입니다"
 
     assert _failure_code(echo, context, 0.72, "stop") == "context_echo"
-    assert _failure_code(context[:80], context, 0.72, "stop") == "text_rate_exceeded"
+    # staging에서 관찰된 것처럼 줄 경계를 걸쳐 맥락 가운데를 복사하면 속도 기준에 걸리지 않는다.
+    partial = "백엔드, 프론트엔드, AI 담당 주요 용어: Meety, 화자 분리, Nemotron"
+    assert _failure_code(partial, context, 5.0, "stop") == "context_echo"
+    assert _failure_code("네 " * 40, context, 0.72, "stop") == "text_rate_exceeded"
     assert _failure_code("네 그럼 로드맵부터 볼까요", context, 0.72, "stop") is None
     assert _failure_code(quote, context, 5.0, "stop") is None

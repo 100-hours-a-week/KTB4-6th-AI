@@ -65,15 +65,15 @@ def _failure_code(text: str, context: str, seconds: float, finish_reason: str | 
         return "generation_token_cap"
     if not text.strip():
         return "empty_transcript"
-    # 발화가 없으면 모델이 프롬프트의 맥락 전체를 그대로 출력한다(#135).
-    # shortcut: 관찰된 것은 문장부호·공백만 다른 전문 복사뿐이라 완전 일치만 잡는다.
-    # 맥락 일부나 변형된 복사가 관찰되면 계산량 상한이 있는 유사도 비교로 넓힌다.
+    # 발화가 없으면 모델이 프롬프트의 맥락 전체나 일부를 그대로 출력한다(#135).
+    # shortcut: 관찰된 것은 문장부호·공백만 다른 연속 구간 복사뿐이라 부분 문자열만 잡는다.
+    # 단어가 바뀐 변형 복사가 관찰되면 계산량 상한이 있는 유사도 비교로 넓힌다.
     compact = _alnum(text)
     if len(compact) < CONTEXT_ECHO_MIN_CHARS:
         return None
-    if compact == _alnum(context):
+    if compact in _alnum(context):
         return "context_echo"
-    # 맥락 일부 복사나 상한 전에 멈춘 반복 생성처럼 음성 길이로 말할 수 없는 분량을 버린다.
+    # 상한 전에 멈춘 반복 생성처럼 음성 길이로 말할 수 없는 분량을 버린다.
     if len(compact) > MAX_CHARS_PER_SECOND * seconds:
         return "text_rate_exceeded"
     return None
