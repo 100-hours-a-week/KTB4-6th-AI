@@ -169,16 +169,24 @@ class PipelineSession:
                 return
 
     async def _activity(self, row: list[int], lower: int, upper: int) -> None:
-        if any(row):
-            for speaker in list(self.open_turns):
-                if not row[speaker]:
-                    await self._close_turn(
-                        speaker, self.pending_ends.get(speaker, lower), "speaker_change"
-                    )
         for speaker, enabled in enumerate(row):
             if enabled:
-                self.pending_ends.pop(speaker, None)
+                paused = self.pending_ends.pop(speaker, None)
+                if paused is not None:
+                    # 1초 안에 돌아오면 멈춘 사이 시작한 짧은 다른 화자 구간을 따로 전사하지 않고
+                    # 이 화자 구간에 포함한다. 500ms를 넘긴 구간이었다면 이 화자는 이미 닫혔다.
+                    for other, started in list(self.open_turns.items()):
+                        if other != speaker and started >= paused:
+                            del self.open_turns[other]
+                            self.pending_ends.pop(other, None)
                 self.open_turns.setdefault(speaker, lower)
+                if upper - self.open_turns[speaker] >= SAMPLE_RATE // 2:
+                    # 500ms 이상 이어진 화자만 전환을 확정하고, 보류한 이전 화자 구간을 닫는다.
+                    for other in list(self.open_turns):
+                        if other != speaker:
+                            await self._close_turn(
+                                other, self.pending_ends.get(other, lower), "speaker_change"
+                            )
                 boundary = self.open_turns[speaker] + 25 * SAMPLE_RATE
                 if upper >= boundary:
                     await self._close_turn(speaker, boundary, "max_duration")
