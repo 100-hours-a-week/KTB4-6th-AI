@@ -24,6 +24,7 @@ from meety_ai.modal_app.stt.protocol import (
     MAX_AUDIO_MESSAGE_BYTES,
     MAX_TEXT_MESSAGE_BYTES,
     SAMPLE_RATE,
+    SEGMENT_FAILURE_CODES,
     ContextUpdate,
     SessionStart,
     control_adapter,
@@ -577,12 +578,12 @@ class InferenceRuntime:
                         if error:
                             message["code"] = error
                             session.failed += 1
-                            if error != "empty_transcript":
+                            if error not in SEGMENT_FAILURE_CODES:
                                 session.failure = error
                             logger.warning(
                                 "asr_segment_failed meetingId=%s recordingSessionId=%s "
                                 "segmentId=%s speakerId=%s startedAtMs=%s endedAtMs=%s "
-                                "durationMs=%s reason=%s code=%s",
+                                "durationMs=%s reason=%s code=%s textChars=%s textHead=%r",
                                 session.start.meeting_id,
                                 session.start.recording_session_id,
                                 job.segment_id,
@@ -592,6 +593,9 @@ class InferenceRuntime:
                                 (job.end_sample - job.start_sample) * 1000 // SAMPLE_RATE,
                                 job.reason,
                                 error,
+                                len(text),
+                                # 반복 생성 원인 확인용으로 출력 앞부분을 남긴다.
+                                text[:80],
                             )
                         else:
                             message["content"] = text

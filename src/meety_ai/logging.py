@@ -1,4 +1,4 @@
-"""앱과 Uvicorn 로그를 구조화한다. 회의 내용이나 비밀값은 기록하지 않는다."""
+"""앱과 Uvicorn 로그를 구조화한다. 비밀값은 기록하지 않는다."""
 
 import logging
 import sys
