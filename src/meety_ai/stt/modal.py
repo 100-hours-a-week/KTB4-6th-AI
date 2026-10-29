@@ -7,6 +7,7 @@ from websockets.asyncio.client import connect
 
 from meety_ai.modal_app.stt.protocol import (
     MAX_AUDIO_MESSAGE_BYTES,
+    SEGMENT_FAILURE_CODES,
     ContextUpdate,
     PipelineFailure,
     SegmentCommitted,
@@ -114,7 +115,7 @@ class ModalSTTClient:
                     ):
                         raise self._report_error()
                     if isinstance(result, SegmentFailed):
-                        if result.code != "empty_transcript":
+                        if result.code not in SEGMENT_FAILURE_CODES:
                             raise self._report_error()
                         self._failed_segments += 1
                         continue

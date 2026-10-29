@@ -165,10 +165,10 @@ async def test_modal_context_update_applies_to_next_inference(monkeypatch):
 # 목적: Modal 기동 중에도 음성을 받고 준비 후 입력 순서대로 전사·종료하는 흐름을 보호한다.
 # 준비: 모델 추론만 대체하고 실제 Modal adapter의 로컬 WebSocket 연결을 잠시 보류한다.
 # 실행: 연결 준비 중 42개 PCM·heartbeat → 첫 전사 → pause/resume → 중간·다음 전사 → stop.
-# 기대 결과: 준비 중 ACK·pong, PCM 순서, 빈 결과 뒤 화자·전사 번호와 마지막 전사 drain을 유지한다.
-# 실패 조건: 준비 중 수신이 막히거나 PCM이 유실되거나 빈 결과로 종료·화자 정보 소실이 난다.
-@pytest.mark.parametrize("empty_middle_turn", [False, True])
-def test_modal_transcript_before_stop_and_final_drain(monkeypatch, capsys, empty_middle_turn):
+# 기대 결과: 준비 중 ACK·pong, PCM 순서, 구간 실패 뒤 화자·전사 번호와 마지막 전사 drain을 유지한다.
+# 실패 조건: 준비 중 수신이 막히거나 PCM이 유실되거나 구간 실패로 세션 종료·화자 정보 소실이 난다.
+@pytest.mark.parametrize("failure_code", [None, "empty_transcript", "generation_token_cap"])
+def test_modal_transcript_before_stop_and_final_drain(monkeypatch, capsys, failure_code):
     class Runtime(InferenceRuntime):
         def __init__(self):
             self.geometry = {
@@ -197,8 +197,8 @@ def test_modal_transcript_before_stop_and_final_drain(monkeypatch, capsys, empty
 
         def _transcribe(self, jobs):
             return [
-                ("", "empty_transcript")
-                if empty_middle_turn and job.speaker == 1
+                ("", failure_code)
+                if failure_code and job.speaker == 1
                 else (f"화자 {job.speaker}의 발언", None)
                 for job in jobs
             ]
@@ -283,13 +283,13 @@ def test_modal_transcript_before_stop_and_final_drain(monkeypatch, capsys, empty
                 for sequence, chunk in enumerate(remaining, start=len(chunks)):
                     ws.send_json({"type": "audio.meta", "payload": {"sequence": sequence}})
                     ws.send_bytes(chunk)
-                responses = [ws.receive_json() for _ in range(7 if empty_middle_turn else 8)]
+                responses = [ws.receive_json() for _ in range(7 if failure_code else 8)]
                 assert sum(event["type"] == "audio.ack" for event in responses) == 6
                 transcripts = [
                     event for event in responses if event["type"] == "transcript.committed"
                 ]
-                assert len(transcripts) == (1 if empty_middle_turn else 2)
-                if not empty_middle_turn:
+                assert len(transcripts) == (1 if failure_code else 2)
+                if not failure_code:
                     middle = transcripts[0]
                     assert middle["payload"]["speakerId"] == 1
                     assert middle["payload"]["sequenceNumber"] == 1
@@ -299,7 +299,7 @@ def test_modal_transcript_before_stop_and_final_drain(monkeypatch, capsys, empty
                 assert final["payload"]["content"] == "화자 2의 발언"
                 assert final["payload"]["startedAtMs"] == 5000
                 assert final["payload"]["endedAtMs"] == 6000
-                assert final["payload"]["sequenceNumber"] == (1 if empty_middle_turn else 2)
+                assert final["payload"]["sequenceNumber"] == (1 if failure_code else 2)
                 ws.send_json({"type": "session.stop", "requestId": "stop"})
                 tail = ws.receive_json()
                 assert tail["type"] == "transcript.committed"
@@ -314,7 +314,7 @@ def test_modal_transcript_before_stop_and_final_drain(monkeypatch, capsys, empty
             assert app.state.recording_connections == 0
         assert not runtime.sessions
         assert b"".join(runtime.audio) == b"".join(chunks + remaining)
-        if empty_middle_turn:
+        if failure_code:
             failure = next(
                 line
                 for line in capsys.readouterr().out.splitlines()
@@ -329,7 +329,7 @@ def test_modal_transcript_before_stop_and_final_drain(monkeypatch, capsys, empty
                 "endedAtMs=3000",
                 "durationMs=1000",
                 "reason=silence",
-                "code=empty_transcript",
+                f"code={failure_code}",
             ):
                 assert field in failure
     finally:
