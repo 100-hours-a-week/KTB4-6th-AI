@@ -29,6 +29,7 @@ def test_summary_request_accepts_complete_transcript():
             {
                 "segmentId": 1,
                 "speakerId": 1,
+                "displayName": "홍길동",
                 "sequenceNumber": 0,
                 "content": "진행 상황을 공유하겠습니다.",
                 "startedAtMs": 0,
@@ -77,6 +78,7 @@ def test_summary_regeneration_request():
             {
                 "segmentId": 1,
                 "speakerId": 1,
+                "displayName": "홍길동",
                 "sequenceNumber": 0,
                 "content": ("진행 상황을 공유하겠습니다. 오늘은 요약 기능 스키마를 구현했습니다."),
                 "startedAtMs": 0,

@@ -7,12 +7,18 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from openai import APIError, APITimeoutError
 from structlog.contextvars import bind_contextvars
 
-from meety_ai.summary.schemas import SummaryRequest
+from meety_ai.summary.schemas import SummaryRequest, SummarySegment
 
 logger = structlog.stdlib.get_logger(__name__)
 
 summary_router = APIRouter()
 WORK_TIMEOUT_SECONDS = 180
+
+
+def speaker_label(segment: SummarySegment) -> str:
+    if segment.display_name:
+        return segment.display_name
+    return "미확인 화자" if segment.speaker_id is None else f"화자 {segment.speaker_id}"
 
 
 @summary_router.post("/v1/summary")
@@ -23,15 +29,8 @@ async def generate_summary(payload: SummaryRequest, request: Request) -> Respons
     started = time.perf_counter()
     try:
         async with asyncio.timeout(WORK_TIMEOUT_SECONDS):
-            speaker_names = {
-                speaker.speaker_id: speaker.display_name or f"화자 {speaker.speaker_id}"
-                for speaker in payload.speakers
-            }
-            speaker_names[None] = "미확인 화자"
             transcript = "\n".join(
-                f"{speaker_names.get(segment.speaker_id, f'화자 {segment.speaker_id}')}: "
-                f"{segment.content}"
-                for segment in payload.segments
+                f"{speaker_label(segment)}: {segment.content}" for segment in payload.segments
             )
             markdown = await request.app.state.summary_chain.ainvoke(
                 {
