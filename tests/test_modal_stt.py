@@ -16,7 +16,7 @@ from websockets.asyncio.client import connect
 
 import meety_ai.stt.modal as adapter_module
 from meety_ai.live import create_live_app
-from meety_ai.modal_app.stt.pipeline import InferenceRuntime, create_inference_app
+from meety_ai.modal_app.stt.pipeline import InferenceRuntime, _failure_code, create_inference_app
 from meety_ai.modal_app.stt.protocol import SessionStart
 
 
@@ -81,7 +81,8 @@ async def test_modal_context_update_applies_to_next_inference(monkeypatch):
                 loop.call_soon_threadsafe(first_started.set)
                 assert resume_first.wait(timeout=5)
             self.generations.extend({"finish_reason": "stop"} for _ in audio)
-            return [SimpleNamespace(text=f"전사: {value}") for value in context]
+            # 맥락을 그대로 출력하면 맥락 복사로 버려지므로 맥락 길이로 사용한 맥락을 구분한다.
+            return [SimpleNamespace(text=f"전사: {len(value)}자") for value in context]
 
         async def _call_worker(self, request):
             return {"released": True}
@@ -132,18 +133,18 @@ async def test_modal_context_update_applies_to_next_inference(monkeypatch):
             resume_first.set()
             first = await transcripts.get()
             second = await transcripts.get()
-            assert first.content == f"전사: {default_context}"
-            assert second.content == f"전사: {updated_context}"
+            assert first.content == f"전사: {len(default_context)}자"
+            assert second.content == f"전사: {len(updated_context)}자"
             assert first.speaker_id == second.speaker_id == 0
             assert (first.started_at_ms, first.ended_at_ms) == (0, 1000)
             assert (second.started_at_ms, second.ended_at_ms) == (3000, 4000)
             await clients[1].send_audio(bytes(3 * 32000))
-            assert (await other_transcripts.get()).content == "전사: 다른 세션"
+            assert (await other_transcripts.get()).content == "전사: 5자"
             await clients[0].update_context("")
             await clients[0].send_audio(bytes(32000))
             await clients[0].finish()
             tail = await transcripts.get()
-            assert tail.content == "전사: "
+            assert tail.content == "전사: 0자"
             assert (tail.started_at_ms, tail.ended_at_ms) == (6000, 7000)
             await clients[1].finish()
             await wait_until(lambda: not runtime.sessions)
@@ -896,3 +897,29 @@ def test_speaker_mapping_links_enrolled_speaker_and_holds_mismatched_segment(mon
         server.should_exit = True
         thread.join(timeout=5)
         listener.close()
+
+
+# 테스트 이름: test_context_echo_and_overlong_text_fail_segment_but_keep_real_speech
+# 목적: 무음 구간에서 ASR이 회의 맥락을 복사하거나 음성 길이로 말할 수 없는 분량을 출력하면
+#       확정 전사로 노출되지 않게 보호한다(#135).
+# 준비: 여러 줄 맥락. 0.72초 구간의 문장부호만 바꾼 맥락 전문 출력과 맥락 앞부분만 복사한 출력,
+#       맥락 단어가 섞인 짧은 발화, 정상 속도로 맥락 한 줄을 그대로 읽은 긴 발화 출력.
+# 실행: pipeline._failure_code(출력, 맥락, 구간 초, "stop")을 각 출력에 호출한다.
+# 기대 결과: 전문 복사는 "context_echo", 일부 복사는 "text_rate_exceeded", 실제 발화 두 개는 None.
+# 실패 조건: 맥락 복사·과생성이 정상 전사로 통과하거나, 맥락을 인용한 정상 발화가 버려질 때.
+def test_context_echo_and_overlong_text_fail_segment_but_keep_real_speech():
+    context = "\n".join(
+        [
+            "회의 주제: 3분기 서비스 로드맵 점검과 실시간 전사 품질 개선 방안 논의",
+            "참가자: 기획, 백엔드, 프론트엔드, AI 담당",
+            "주요 용어: Meety, 화자 분리, Nemotron, Qwen ASR, Modal, 스테이징 배포",
+            "안건: 무음 구간 처리 기준, 회의 요약 품질 지표, 다음 스프린트 일정 확정",
+        ]
+    )
+    echo = context.replace("\n", " ").replace(":", "").replace(",", "")
+    quote = "오늘 안건은 무음 구간 처리 기준, 회의 요약 품질 지표, 다음 스프린트 일정 확정입니다"
+
+    assert _failure_code(echo, context, 0.72, "stop") == "context_echo"
+    assert _failure_code(context[:80], context, 0.72, "stop") == "text_rate_exceeded"
+    assert _failure_code("네 그럼 로드맵부터 볼까요", context, 0.72, "stop") is None
+    assert _failure_code(quote, context, 5.0, "stop") is None

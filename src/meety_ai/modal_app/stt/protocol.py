@@ -11,7 +11,15 @@ SAMPLE_RATE = 16000
 MAX_AUDIO_MESSAGE_BYTES = 256 * 1024
 MAX_TEXT_MESSAGE_BYTES = 64 * 1024
 # 구간 하나만 실패시키고 세션은 계속하는 오류 코드. 그 밖의 코드는 세션을 종료한다.
-SEGMENT_FAILURE_CODES = frozenset({"empty_transcript", "generation_token_cap", "asr_failed"})
+SEGMENT_FAILURE_CODES = frozenset(
+    {
+        "empty_transcript",
+        "context_echo",
+        "text_rate_exceeded",
+        "generation_token_cap",
+        "asr_failed",
+    }
+)
 
 
 class SessionStart(Message):

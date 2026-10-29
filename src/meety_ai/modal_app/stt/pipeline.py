@@ -48,6 +48,35 @@ EMBEDDING_DEVICE = "cuda"
 # shortcut: GPU 추출 측정 전 초기값이다. 구간 제출 후 이 시간이 지나면 화자를 보류하고
 # 늦은 벡터는 버린다. 추출이 밀려도 결과 전송을 막지 않도록 제출 시점부터 잰다.
 EMBEDDING_WAIT_SECONDS = 10
+# 맥락 복사·과생성으로 판정할 최소 글자 수. 짧은 발화는 맥락과 같거나 빨라도 버리지 않는다.
+CONTEXT_ECHO_MIN_CHARS = 30
+# shortcut: 6팀-149 실측에서 30자 이상 정상 구간은 초당 최대 9.3자(문자·숫자 기준)였고
+# 맥락 복사 구간은 296자였다. 다른 음원에서 정상 구간이 걸리면 다시 잰다.
+MAX_CHARS_PER_SECOND = 25
+
+
+def _alnum(text: str) -> str:
+    return "".join(char for char in text if char.isalnum())
+
+
+def _failure_code(text: str, context: str, seconds: float, finish_reason: str | None) -> str | None:
+    """ASR 출력 하나를 구간 실패 코드로 분류한다. 정상 전사면 None이다."""
+    if finish_reason == "length":
+        return "generation_token_cap"
+    if not text.strip():
+        return "empty_transcript"
+    # 발화가 없으면 모델이 프롬프트의 맥락 전체를 그대로 출력한다(#135).
+    # shortcut: 관찰된 것은 문장부호·공백만 다른 전문 복사뿐이라 완전 일치만 잡는다.
+    # 맥락 일부나 변형된 복사가 관찰되면 계산량 상한이 있는 유사도 비교로 넓힌다.
+    compact = _alnum(text)
+    if len(compact) < CONTEXT_ECHO_MIN_CHARS:
+        return None
+    if compact == _alnum(context):
+        return "context_echo"
+    # 맥락 일부 복사나 상한 전에 멈춘 반복 생성처럼 음성 길이로 말할 수 없는 분량을 버린다.
+    if len(compact) > MAX_CHARS_PER_SECOND * seconds:
+        return "text_rate_exceeded"
+    return None
 
 
 class PipelineError(Exception):
@@ -506,10 +535,12 @@ class InferenceRuntime:
             if not len(waveform) or len(waveform) > 25 * SAMPLE_RATE:
                 raise PipelineError("asr_input_invalid")
             audio.append((waveform, SAMPLE_RATE))
+        # 추론 중 맥락이 갱신돼도 모델 입력과 맥락 복사 판정에 같은 맥락을 쓴다.
+        contexts = [job.session.context for job in jobs]
         try:
             outputs = self.asr.transcribe(
                 audio=audio,
-                context=[job.session.context for job in jobs],
+                context=contexts,
                 language="Korean",
                 return_time_stamps=False,
             )
@@ -531,11 +562,16 @@ class InferenceRuntime:
         return [
             (
                 output.text,
-                "generation_token_cap"
-                if generation["finish_reason"] == "length"
-                else ("empty_transcript" if not output.text.strip() else None),
+                _failure_code(
+                    output.text,
+                    context,
+                    (job.end_sample - job.start_sample) / SAMPLE_RATE,
+                    generation["finish_reason"],
+                ),
             )
-            for output, generation in zip(outputs, self.generations, strict=True)
+            for job, context, output, generation in zip(
+                jobs, contexts, outputs, self.generations, strict=True
+            )
         ]
 
     async def _asr_loop(self) -> None:
