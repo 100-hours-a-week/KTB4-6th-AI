@@ -136,3 +136,31 @@ def test_recording_accepts_backend_numeric_string_ids_and_returns_integer_ids(
         assert app.state.recording_connections == 0
         assert fake_speechmatics_client[0].closed
         assert fake_speechmatics_client[0].finished
+
+
+# 테스트 이름: test_session_start_rejects_embedding_with_overflowing_norm
+# 목적: 성분은 유한하지만 노름이 무한대로 넘치는 등록 벡터가 세션 전체를 실패시키던 버그를 막는다.
+# 준비: 모든 성분이 1e200인 192차원 등록 벡터를 가진 참가자 한 명.
+# 실행: client_event_adapter로 session.start를 검증한다.
+# 기대 결과: 입력 형식 오류(ValidationError)로 거절된다.
+# 실패 조건: 검증을 통과해 Modal 화자 판정에서 TypeError로 세션이 끝난다.
+def test_session_start_rejects_embedding_with_overflowing_norm():
+    raw = json.dumps(
+        {
+            "type": "session.start",
+            "requestId": "req-1",
+            "meetingId": 42,
+            "recordingSessionId": 88,
+            "participantCount": 1,
+            "participants": [
+                {
+                    "teamMemberId": 10,
+                    "name": "김지우",
+                    "speakerEmbedding": {"modelVersion": "v1", "embedding": [1e200] * 192},
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(ValidationError):
+        client_event_adapter.validate_json(raw)

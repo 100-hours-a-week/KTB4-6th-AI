@@ -1,7 +1,7 @@
 """Speechmatics 실시간 전사 연결을 관리한다."""
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from speechmatics.rt import (
@@ -14,7 +14,7 @@ from speechmatics.rt import (
 )
 
 from meety_ai.stt.client import STTProviderError
-from meety_ai.stt.schemas import STTTranscript
+from meety_ai.stt.schemas import SpeakerProfile, STTTranscript
 
 MAX_TRANSCRIPT_DURATION_SECONDS = 10
 SENTENCE_ENDINGS = (".", "?", "!")
@@ -127,7 +127,12 @@ class SpeechmaticsClient:
             self._report_error()
 
     async def start(
-        self, *, meeting_id: int = 0, recording_session_id: int = 0, context: str = ""
+        self,
+        *,
+        meeting_id: int = 0,
+        recording_session_id: int = 0,
+        context: str = "",
+        profiles: Sequence[SpeakerProfile] = (),
     ) -> None:
         """한국어 Enhanced 실시간 전사 세션을 시작한다."""
         try:

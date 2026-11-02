@@ -22,6 +22,11 @@ class TranscriptionSegment(Message):
     ended_at_ms: NonNegativeInt
 
 
+class SummarySegment(TranscriptionSegment):
+    # Backend가 정한 현재 화자 표시 이름이며, 화자가 확정되지 않으면 null이다.
+    display_name: str | None = None
+
+
 class SummaryRequest(Message):
     request_id: Identifier
     meeting_id: MeetingId
@@ -29,8 +34,9 @@ class SummaryRequest(Message):
     purpose: str
     note: str
     meeting_started_at: Annotated[datetime, Field(strict=False)]
+    # Backend는 현재 빈 목록을 보내며, 화자 이름은 세그먼트의 display_name을 사용한다.
     speakers: list[Speaker]
-    segments: Annotated[list[TranscriptionSegment], Field(min_length=1)]
+    segments: Annotated[list[SummarySegment], Field(min_length=1)]
     previous_summary: (
         Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)] | None
     ) = Field(default=None, exclude_if=lambda value: value is None)

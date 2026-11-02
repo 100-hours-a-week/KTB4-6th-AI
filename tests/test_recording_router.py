@@ -1,13 +1,17 @@
 import asyncio
 import json
+import time
 from datetime import datetime, timedelta
 from threading import Event
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
+from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from pydantic import ValidationError
 from starlette.testclient import WebSocketDenialResponse
 from starlette.websockets import WebSocketDisconnect
+from structlog.testing import capture_logs
 
 import meety_ai.recording.connection as connection_module
 from meety_ai.live import create_live_app
@@ -790,3 +794,143 @@ def test_audio_ack_heartbeat_and_reconnection(fake_speechmatics_client):
             assert provider.finished
             assert provider.closed
             assert app.state.recording_connections == 0
+
+
+# 테스트 이름: test_stt_context_generated_from_related_meetings
+# 목적: 기본 맥락으로 녹음·전사를 진행하면서 관련 과거 회의로 만든 맥락을 같은 STT 세션에 전달한다.
+# 준비: Backend 조회는 MockTransport, LLM은 선택·생성 응답을 차례로 내는 fake 모델로 대체한다.
+# 실행: start(teamId 포함) → ready → 오디오 → 맥락 적용 대기 → 전사 수신 → stop.
+# 기대 결과: 선택한 회의 요약만 녹음 세션 권한 헤더로 조회하고, 생성 맥락이 한 번 전달된다.
+# 기대 결과: 맥락 적용 후에도 전사와 정상 종료가 동작하고 공급자 연결이 정리된다.
+# 실패 조건: 맥락 생성이 녹음을 막거나, QnA 헤더로 조회하거나, 맥락이 전달되지 않는다.
+def test_stt_context_generated_from_related_meetings(fake_speechmatics_client):
+    requests = []
+
+    def meeting(meeting_id, title):
+        return {
+            "meetingId": meeting_id,
+            "title": title,
+            "scheduledAt": None,
+            "startedAt": None,
+            "endedAt": None,
+            "targetDurationMinutes": 60,
+            "status": "COMPLETED",
+            "createdByTeamMemberId": 1,
+        }
+
+    def handle(request):
+        requests.append(request)
+        if request.url.path == "/internal/v1/qna/teams/10/meetings":
+            data = {
+                "groups": [
+                    {
+                        "date": "2026-10-20",
+                        "meetingCount": 2,
+                        "meetings": [meeting(7, "STT 개선 회의"), meeting(8, "워크숍 준비")],
+                    }
+                ],
+                "nextCursor": None,
+                "hasNext": False,
+            }
+        else:
+            data = {"summary": {"summaryId": 3, "status": "COMPLETED", "content": "Qwen3 맥락"}}
+        return httpx.Response(200, json={"success": True, "data": data, "error": None})
+
+    generated = "회의: 주간 STT 회의\n참가자: 홍길동\n용어: Qwen3, Modal"
+    app = create_live_app()
+    with TestClient(app) as client:
+        app.state.stt_context_model = FakeListChatModel(
+            responses=['{"meetingIds": [7]}', generated]
+        )
+        app.state.backend_client = httpx.AsyncClient(
+            base_url="https://backend.test",
+            headers={"X-Internal-Api-Key": "test-internal-key"},
+            transport=httpx.MockTransport(handle),
+        )
+        with client.websocket_connect(WEBSOCKET_URL) as ws:
+            ws.send_json(
+                {
+                    **start_message,
+                    "teamId": 10,
+                    "title": "주간 STT 회의",
+                    "participantCount": 1,
+                    "participants": [{"teamMemberId": 1, "name": "홍길동"}],
+                }
+            )
+            assert ws.receive_json()["type"] == "session.ready"
+            ws.send_json(meta_message)
+            ws.send_bytes(b"\x01\x00" * 8000)
+            assert ws.receive_json()["type"] == "audio.ack"
+
+            stt_client = fake_speechmatics_client[0]
+            deadline = time.monotonic() + 5
+            while not stt_client.contexts and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert stt_client.contexts == [generated]
+
+            stt_client.emit_transcript()
+            assert ws.receive_json()["type"] == "transcript.committed"
+            ws.send_json(stop_message)
+            assert ws.receive_json()["type"] == "session.ended"
+
+        assert [request.url.path for request in requests] == [
+            "/internal/v1/qna/teams/10/meetings",
+            "/internal/v1/qna/meetings/7/summaries",
+        ]
+        for request in requests:
+            assert request.headers["X-Recording-Session-Id"] == "1"
+            assert request.headers["X-Internal-Api-Key"] == "test-internal-key"
+            assert "X-Ai-Request-Id" not in request.headers
+        assert stt_client.fed == [b"\x01\x00" * 8000]
+        assert stt_client.closed
+
+
+# 테스트 이름: test_stt_context_retrieval_denied_keeps_default_context
+# 목적: 녹음 세션 조회 권한 거부를 자료 없음으로 취급해 맥락을 만들지 않도록 보호한다.
+# 준비: 회의 목록 조회가 403 RECORDING_SESSION_ACCESS_DENIED를 반환하고,
+# 준비: 잘못 진행되면 맥락을 만들어 내는 fake 모델을 둔다.
+# 실행: start → 생성 실패 로그 대기 → 오디오·전사 → stop.
+# 기대 결과: 맥락 갱신은 전송되지 않고 녹음·전사·정상 종료는 그대로 동작한다.
+# 실패 조건: 조회 거부 후에도 LLM 생성이 진행되거나 녹음이 실패한다.
+def test_stt_context_retrieval_denied_keeps_default_context(fake_speechmatics_client):
+    def handle(request):
+        return httpx.Response(
+            403,
+            json={
+                "success": False,
+                "data": None,
+                "error": {"code": "RECORDING_SESSION_ACCESS_DENIED"},
+            },
+        )
+
+    app = create_live_app()
+    with TestClient(app) as client, capture_logs() as logs:
+        app.state.stt_context_model = FakeListChatModel(
+            responses=['{"meetingIds": []}', "회의: 주간 STT 회의"]
+        )
+        app.state.backend_client = httpx.AsyncClient(
+            base_url="https://backend.test", transport=httpx.MockTransport(handle)
+        )
+        with client.websocket_connect(WEBSOCKET_URL) as ws:
+            ws.send_json({**start_message, "teamId": 10, "title": "주간 STT 회의"})
+            assert ws.receive_json()["type"] == "session.ready"
+
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and not any(
+                log["event"] == "stt_context_failed" for log in logs
+            ):
+                time.sleep(0.01)
+            assert any(log["event"] == "stt_context_failed" for log in logs)
+
+            ws.send_json(meta_message)
+            ws.send_bytes(b"\x01\x00" * 8000)
+            assert ws.receive_json()["type"] == "audio.ack"
+            stt_client = fake_speechmatics_client[0]
+            stt_client.emit_transcript()
+            assert ws.receive_json()["type"] == "transcript.committed"
+            ws.send_json(stop_message)
+            assert ws.receive_json()["type"] == "session.ended"
+
+        assert stt_client.contexts == []
+        assert stt_client.finished
+        assert stt_client.closed

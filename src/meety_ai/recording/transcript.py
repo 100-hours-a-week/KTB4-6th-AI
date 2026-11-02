@@ -1,4 +1,4 @@
-"""공통 전사 구간을 Backend 메시지로 전송한다."""
+"""공통 전사 구간과 화자 연결 변경을 Backend 메시지로 전송한다."""
 
 import asyncio
 from datetime import UTC, datetime
@@ -9,13 +9,15 @@ from meety_ai.core.schemas import MeetingId, RecordingSessionId
 from meety_ai.recording.schemas import (
     Message,
     SessionError,
+    SpeakerMappingUpdated,
+    SpeakerMappingUpdatedPayload,
     TranscriptCommitted,
     TranscriptCommittedPayload,
 )
-from meety_ai.stt.schemas import STTTranscript
+from meety_ai.stt.schemas import STTSpeakerMapping, STTTranscript
 
 MESSAGE_SEND_TIMEOUT = 10
-TranscriptQueue = asyncio.Queue[STTTranscript | None]
+TranscriptQueue = asyncio.Queue[STTTranscript | STTSpeakerMapping | None]
 
 
 async def send_message(websocket: WebSocket, message: Message) -> None:
@@ -36,11 +38,25 @@ async def send_transcripts(
     start_sequence: int = 0,
     transcript_sequence_start: int = 0,
 ) -> None:
-    """확정 전사에 회의 식별자·전사 번호·재연결 시간 오프셋을 붙여 전송한다."""
+    """확정 전사에 회의 식별자·전사 번호·재연결 시간 오프셋을 붙여 수신 순서대로 전송한다.
+
+    화자 매핑 변경은 같은 순서로 보내되 전사 번호를 소비하지 않는다.
+    """
     sequence_number = transcript_sequence_start
     # shortcut: 짧은 청크의 오차를 허용하며, 정확한 복구가 필요하면 누적 샘플 위치를 전달한다.
     time_offset_ms = start_sequence * 100
     while (segment := await queue.get()) is not None:
+        if isinstance(segment, STTSpeakerMapping):
+            await send_message(
+                websocket,
+                SpeakerMappingUpdated(
+                    type="speaker.mapping.updated",
+                    meeting_id=meeting_id,
+                    recording_session_id=recording_session_id,
+                    payload=SpeakerMappingUpdatedPayload(mappings=segment.mappings),
+                ),
+            )
+            continue
         transcript = TranscriptCommitted(
             type="transcript.committed",
             meeting_id=meeting_id,

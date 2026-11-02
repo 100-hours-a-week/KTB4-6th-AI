@@ -1,22 +1,25 @@
 """Modal WebSocket을 기존 STT 수명주기와 확정 전사 콜백에 연결한다."""
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from websockets.asyncio.client import connect
 
 from meety_ai.modal_app.stt.protocol import (
     MAX_AUDIO_MESSAGE_BYTES,
+    SEGMENT_FAILURE_CODES,
+    ContextUpdate,
     PipelineFailure,
     SegmentCommitted,
     SegmentFailed,
     SessionEnded,
     SessionReady,
     SessionStart,
+    SpeakerMappingUpdated,
     result_adapter,
 )
 from meety_ai.stt.client import STTProviderError
-from meety_ai.stt.schemas import STTTranscript
+from meety_ai.stt.schemas import SpeakerProfile, STTSpeakerMapping, STTTranscript
 
 
 class ModalSTTClient:
@@ -25,7 +28,7 @@ class ModalSTTClient:
         url: str,
         proxy_token_id: str,
         proxy_token_secret: str,
-        on_transcript: Callable[[STTTranscript], None],
+        on_transcript: Callable[[STTTranscript | STTSpeakerMapping], None],
         on_error: Callable[[Exception], None] | None = None,
         start_timeout_seconds: float = 240,
     ):
@@ -38,6 +41,7 @@ class ModalSTTClient:
         self._error: STTProviderError | None = None
         self._closing = self._finishing = self._ended = False
         self._received_segments = self._failed_segments = self._sent_bytes = 0
+        self._team_member_ids: set[int] = set()
 
     def _report_error(self) -> STTProviderError:
         if self._error is None:
@@ -52,7 +56,9 @@ class ModalSTTClient:
         meeting_id: int = 0,
         recording_session_id: int = 0,
         context: str = "",
+        profiles: Sequence[SpeakerProfile] = (),
     ) -> None:
+        self._team_member_ids = {profile.team_member_id for profile in profiles}
         try:
             async with asyncio.timeout(self._start_timeout):
                 self._websocket = await connect(
@@ -69,6 +75,7 @@ class ModalSTTClient:
                         meeting_id=meeting_id,
                         recording_session_id=recording_session_id,
                         context=context,
+                        speaker_profiles=list(profiles),
                     ).model_dump_json(by_alias=True)
                 )
                 ready = result_adapter.validate_json(await self._websocket.recv())
@@ -88,14 +95,27 @@ class ModalSTTClient:
                 result = result_adapter.validate_json(await self._websocket.recv())
                 if isinstance(result, PipelineFailure):
                     raise self._report_error()
-                if isinstance(result, (SegmentCommitted, SegmentFailed)):
+                if isinstance(result, SpeakerMappingUpdated):
+                    speakers = [m.speaker_id for m in result.mappings]
+                    members = [
+                        m.team_member_id for m in result.mappings if m.team_member_id is not None
+                    ]
+                    # 한 스냅샷에서 화자·참가자는 한 번씩만, 시작 때 보낸 참가자에만 연결된다.
+                    if (
+                        len(speakers) != len(set(speakers))
+                        or len(members) != len(set(members))
+                        or not self._team_member_ids.issuperset(members)
+                    ):
+                        raise self._report_error()
+                    self._on_transcript(STTSpeakerMapping(mappings=result.mappings))
+                elif isinstance(result, (SegmentCommitted, SegmentFailed)):
                     if (
                         result.segment_id != self._received_segments + self._failed_segments
                         or result.ended_at_ms > self._sent_bytes * 1000 // 32000
                     ):
                         raise self._report_error()
                     if isinstance(result, SegmentFailed):
-                        if result.code != "empty_transcript":
+                        if result.code not in SEGMENT_FAILURE_CODES:
                             raise self._report_error()
                         self._failed_segments += 1
                         continue
@@ -150,6 +170,10 @@ class ModalSTTClient:
         await self._receiver
         if self._error is not None or not self._ended:
             raise self._report_error()
+
+    async def update_context(self, context: str) -> None:
+        message = ContextUpdate(type="context.update", context=context)
+        await self._send(message.model_dump_json(by_alias=True))
 
     async def close(self) -> None:
         self._closing = True

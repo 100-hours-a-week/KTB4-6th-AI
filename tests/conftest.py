@@ -1,4 +1,5 @@
 import pytest
+from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
 import meety_ai.live as live_module
 from meety_ai.stt.schemas import STTTranscript
@@ -25,6 +26,7 @@ def fake_speechmatics_client(monkeypatch):
             self.on_transcript = on_transcript
             self.on_error = on_error
             self.fed = []
+            self.contexts = []
             self.closed = True
             self.finished = False
             instances.append(self)
@@ -41,6 +43,9 @@ def fake_speechmatics_client(monkeypatch):
         def emit_disconnect(self):
             self.on_error(ConnectionError("공급자 연결이 끊어졌습니다."))
 
+        async def update_context(self, context):
+            self.contexts.append(context)
+
         async def finish(self):
             self.finished = True
 
@@ -51,6 +56,10 @@ def fake_speechmatics_client(monkeypatch):
     monkeypatch.setenv("MEETY_MODAL_STT_URL", "wss://test.modal.run/transcribe")
     monkeypatch.setenv("MODAL_PROXY_TOKEN_ID", "test-proxy-id")
     monkeypatch.setenv("MODAL_PROXY_TOKEN_SECRET", "test-proxy-secret")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("INTERNAL_API_KEY", "test-internal-key")
+    # 맥락 생성이 실제 LLM을 호출하지 않도록 빈 응답 모델로 대체한다.
+    monkeypatch.setattr(live_module, "ChatOpenAI", lambda **_: FakeListChatModel(responses=[""]))
     monkeypatch.setattr(
         live_module,
         "ModalSTTClient",

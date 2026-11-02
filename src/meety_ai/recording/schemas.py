@@ -3,14 +3,17 @@
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import Field, TypeAdapter
+from pydantic import Field, TypeAdapter, model_validator
 
 from meety_ai.core.schemas import Identifier, MeetingId, Message, NonNegativeInt, RecordingSessionId
+from meety_ai.stt.schemas import SpeakerEmbedding, SpeakerMapping
 
 
 class SessionParticipant(Message):
     team_member_id: NonNegativeInt | None
     name: str
+    # 사전 녹음이 없으면 null이며, 필드 누락도 같은 뜻으로 받는다.
+    speaker_embedding: SpeakerEmbedding | None = None
 
 
 class SessionStart(Message):
@@ -19,6 +22,8 @@ class SessionStart(Message):
     # ponytail: BE 문자열 ID 송신이 변경되면 strict=False를 제거한다(AI #77).
     meeting_id: MeetingId = Field(strict=False)
     recording_session_id: RecordingSessionId = Field(strict=False)
+    # BE가 보내기 전까지는 과거 회의 조회 없이 STT 맥락을 만든다(BE #372).
+    team_id: NonNegativeInt | None = None
     participant_count: NonNegativeInt
     participants: list[SessionParticipant]
     start_sequence: NonNegativeInt = Field(
@@ -28,6 +33,13 @@ class SessionStart(Message):
     title: str = Field(default="", max_length=900)
     purpose: str = Field(default="", max_length=900)
     notes: str = Field(default="", max_length=900)
+
+    @model_validator(mode="after")
+    def validate_speaker_profiles(self):
+        ids = [p.team_member_id for p in self.participants if p.speaker_embedding is not None]
+        if None in ids or len(ids) != len(set(ids)):
+            raise ValueError("등록 벡터가 있는 참가자는 중복되지 않는 teamMemberId가 필요합니다.")
+        return self
 
 
 class SessionReadyPayload(Message):
@@ -59,6 +71,17 @@ class TranscriptCommitted(Message):
     meeting_id: MeetingId
     recording_session_id: RecordingSessionId
     payload: TranscriptCommittedPayload
+
+
+class SpeakerMappingUpdatedPayload(Message):
+    mappings: list[SpeakerMapping]
+
+
+class SpeakerMappingUpdated(Message):
+    type: Literal["speaker.mapping.updated"]
+    meeting_id: MeetingId
+    recording_session_id: RecordingSessionId
+    payload: SpeakerMappingUpdatedPayload
 
 
 class AudioMetaPayload(Message):

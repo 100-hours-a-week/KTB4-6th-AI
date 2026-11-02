@@ -5,10 +5,21 @@ from typing import Annotated, Literal
 from pydantic import Field, TypeAdapter, model_validator
 
 from meety_ai.core.schemas import MeetingId, Message, NonNegativeInt, RecordingSessionId
+from meety_ai.stt.schemas import SpeakerMapping, SpeakerProfile
 
 SAMPLE_RATE = 16000
 MAX_AUDIO_MESSAGE_BYTES = 256 * 1024
-MAX_TEXT_MESSAGE_BYTES = 16 * 1024
+MAX_TEXT_MESSAGE_BYTES = 64 * 1024
+# 구간 하나만 실패시키고 세션은 계속하는 오류 코드. 그 밖의 코드는 세션을 종료한다.
+SEGMENT_FAILURE_CODES = frozenset(
+    {
+        "empty_transcript",
+        "context_echo",
+        "text_rate_exceeded",
+        "generation_token_cap",
+        "asr_failed",
+    }
+)
 
 
 class SessionStart(Message):
@@ -16,6 +27,7 @@ class SessionStart(Message):
     meeting_id: MeetingId
     recording_session_id: RecordingSessionId
     context: str = Field(default="", max_length=3000)
+    speaker_profiles: list[SpeakerProfile] = []
     audio_format: Literal["pcm_s16le"] = "pcm_s16le"
     sample_rate_hz: Literal[16000] = SAMPLE_RATE
     channels: Literal[1] = 1
@@ -23,6 +35,14 @@ class SessionStart(Message):
 
 class SessionStop(Message):
     type: Literal["session.stop"]
+
+
+class ContextUpdate(Message):
+    type: Literal["context.update"]
+    context: str = Field(max_length=800)
+
+
+control_adapter = TypeAdapter(Annotated[SessionStop | ContextUpdate, Field(discriminator="type")])
 
 
 class SessionReady(Message):
@@ -76,6 +96,11 @@ class SessionEnded(Message):
     unscored_tail_samples: NonNegativeInt
 
 
+class SpeakerMappingUpdated(Message):
+    type: Literal["speaker.mapping.updated"]
+    mappings: list[SpeakerMapping]
+
+
 class PipelineFailure(Message):
     type: Literal["error"]
     code: str
@@ -83,7 +108,12 @@ class PipelineFailure(Message):
 
 result_adapter = TypeAdapter(
     Annotated[
-        SessionReady | SegmentCommitted | SegmentFailed | SessionEnded | PipelineFailure,
+        SessionReady
+        | SegmentCommitted
+        | SegmentFailed
+        | SpeakerMappingUpdated
+        | SessionEnded
+        | PipelineFailure,
         Field(discriminator="type"),
     ]
 )

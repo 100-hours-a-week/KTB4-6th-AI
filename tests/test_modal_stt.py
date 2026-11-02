@@ -11,22 +11,165 @@ from types import SimpleNamespace
 import pytest
 import uvicorn
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from websockets.asyncio.client import connect
 
 import meety_ai.stt.modal as adapter_module
 from meety_ai.live import create_live_app
-from meety_ai.modal_app.stt.pipeline import InferenceRuntime, create_inference_app
+from meety_ai.modal_app.stt.pipeline import InferenceRuntime, _failure_code, create_inference_app
 from meety_ai.modal_app.stt.protocol import SessionStart
+
+
+# 테스트 이름: test_modal_context_update_applies_to_next_inference
+# 목적: 같은 연결에서 맥락을 갱신해도 진행 중인 추론과 다른 세션을 변경하지 않는다.
+# 준비: 실제 adapter·WebSocket·파이프라인을 연결하고 수치 처리 의존성과 모델만 대체한다.
+# 실행: 기본 맥락 추론 시작 → 다음 구간 대기 → 맥락 갱신 → 추론 재개 → 다른 세션 전사 → 종료.
+# 기대 결과: 다음 추론부터 새 맥락을 쓰고 화자·시간축·마지막 전사와 세션 정리를 유지한다.
+# 실패 조건: 맥락이 소급되거나 세션 간 섞이거나 큐에 있던 구간에 갱신이 반영되지 않는다.
+async def test_modal_context_update_applies_to_next_inference(monkeypatch):
+    class Waveform:
+        def __init__(self, pcm):
+            self.samples = len(pcm) // 2
+
+        def astype(self, dtype):
+            return self
+
+        def __truediv__(self, divisor):
+            return self
+
+        def __len__(self):
+            return self.samples
+
+    monkeypatch.setitem(
+        sys.modules,
+        "numpy",
+        SimpleNamespace(frombuffer=lambda pcm, dtype: Waveform(pcm), float32=float),
+    )
+    monkeypatch.setitem(
+        sys.modules, "torch", SimpleNamespace(cuda=SimpleNamespace(OutOfMemoryError=MemoryError))
+    )
+    loop = asyncio.get_running_loop()
+    first_started = asyncio.Event()
+    resume_first = threading.Event()
+    calls = []
+
+    class Runtime(InferenceRuntime):
+        def __init__(self):
+            self.geometry = {
+                "first_samples": 16000,
+                "chunk_samples": 16000,
+                "frame_samples": 160,
+                "mel_step": 100,
+            }
+            self.metadata = {"test": True}
+            self.generations = []
+            self.asr = SimpleNamespace(transcribe=self.transcribe)
+            self.start_runtime()
+
+        async def diarize(self, session, pcm, *, last):
+            return {
+                "active": [
+                    [int(frame % 300 < 100), 0, 0, 0, 0, 0, 0, 0]
+                    for frame in range(session.frames, session.frames + len(pcm) // 320)
+                ],
+                "next_start": session.next_sample + len(pcm) // 2,
+            }
+
+        def transcribe(self, *, audio, context, language, return_time_stamps):
+            calls.append(tuple(context))
+            if len(calls) == 1:
+                loop.call_soon_threadsafe(first_started.set)
+                assert resume_first.wait(timeout=5)
+            self.generations.extend({"finish_reason": "stop"} for _ in audio)
+            # 맥락을 그대로 출력하면 맥락 복사로 버려지므로 맥락 길이로 사용한 맥락을 구분한다.
+            return [SimpleNamespace(text=f"전사: {len(value)}자") for value in context]
+
+        async def _call_worker(self, request):
+            return {"released": True}
+
+    async def wait_until(predicate):
+        async with asyncio.timeout(5):
+            while not predicate():
+                await asyncio.sleep(0.01)
+
+    runtime = Runtime()
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+    server = uvicorn.Server(
+        uvicorn.Config(create_inference_app(runtime), log_level="error", lifespan="off")
+    )
+    serving = asyncio.create_task(server.serve(sockets=[listener]))
+    transcripts = asyncio.Queue()
+    other_transcripts = asyncio.Queue()
+    errors = []
+    clients = [
+        adapter_module.ModalSTTClient(
+            f"ws://127.0.0.1:{port}/transcribe", "test", "test", callback, errors.append
+        )
+        for callback in (transcripts.put_nowait, other_transcripts.put_nowait)
+    ]
+    default_context = "기본 " * 1000
+    updated_context = "갱신 " * 266 + " 끝"
+    try:
+        async with asyncio.timeout(10):
+            await wait_until(lambda: server.started)
+            await clients[0].start(meeting_id=1, recording_session_id=1, context=default_context)
+            await clients[1].start(meeting_id=2, recording_session_id=2, context="다른 세션")
+            session, other = runtime.sessions.values()
+            original_key = session.key
+            await clients[0].send_audio(bytes(3 * 32000))
+            await first_started.wait()
+            await clients[0].send_audio(bytes(3 * 32000))
+            await wait_until(lambda: session.segments == 2)
+            with pytest.raises(ValidationError):
+                await clients[0].update_context(updated_context + " ")
+            await clients[0].update_context(updated_context)
+            await wait_until(lambda: session.context == updated_context)
+            assert session.key == original_key
+            assert session.start.context == default_context
+            assert other.context == "다른 세션"
+            assert runtime.asr_queue.qsize() == 1
+            resume_first.set()
+            first = await transcripts.get()
+            second = await transcripts.get()
+            assert first.content == f"전사: {len(default_context)}자"
+            assert second.content == f"전사: {len(updated_context)}자"
+            assert first.speaker_id == second.speaker_id == 0
+            assert (first.started_at_ms, first.ended_at_ms) == (0, 1000)
+            assert (second.started_at_ms, second.ended_at_ms) == (3000, 4000)
+            await clients[1].send_audio(bytes(3 * 32000))
+            assert (await other_transcripts.get()).content == "전사: 5자"
+            await clients[0].update_context("")
+            await clients[0].send_audio(bytes(32000))
+            await clients[0].finish()
+            tail = await transcripts.get()
+            assert tail.content == "전사: 0자"
+            assert (tail.started_at_ms, tail.ended_at_ms) == (6000, 7000)
+            await clients[1].finish()
+            await wait_until(lambda: not runtime.sessions)
+            assert calls == [(default_context,), (updated_context,), ("다른 세션",), ("",)]
+            assert not errors
+    finally:
+        resume_first.set()
+        for client in clients:
+            await client.close()
+        server.should_exit = True
+        await asyncio.wait_for(serving, timeout=5)
+        listener.close()
+        if runtime.asr_task is not None:
+            runtime.asr_task.cancel()
+            await asyncio.gather(runtime.asr_task, return_exceptions=True)
 
 
 # 테스트 이름: test_modal_transcript_before_stop_and_final_drain
 # 목적: Modal 기동 중에도 음성을 받고 준비 후 입력 순서대로 전사·종료하는 흐름을 보호한다.
 # 준비: 모델 추론만 대체하고 실제 Modal adapter의 로컬 WebSocket 연결을 잠시 보류한다.
 # 실행: 연결 준비 중 42개 PCM·heartbeat → 첫 전사 → pause/resume → 중간·다음 전사 → stop.
-# 기대 결과: 준비 중 ACK·pong, PCM 순서, 빈 결과 뒤 화자·전사 번호와 마지막 전사 drain을 유지한다.
-# 실패 조건: 준비 중 수신이 막히거나 PCM이 유실되거나 빈 결과로 종료·화자 정보 소실이 난다.
-@pytest.mark.parametrize("empty_middle_turn", [False, True])
-def test_modal_transcript_before_stop_and_final_drain(monkeypatch, capsys, empty_middle_turn):
+# 기대 결과: 준비 중 ACK·pong, PCM 순서, 구간 실패 뒤 화자·전사 번호와 마지막 전사 drain을 유지한다.
+# 실패 조건: 준비 중 수신이 막히거나 PCM이 유실되거나 구간 실패로 세션 종료·화자 정보 소실이 난다.
+@pytest.mark.parametrize("failure_code", [None, "empty_transcript", "generation_token_cap"])
+def test_modal_transcript_before_stop_and_final_drain(monkeypatch, capsys, failure_code):
     class Runtime(InferenceRuntime):
         def __init__(self):
             self.geometry = {
@@ -55,8 +198,8 @@ def test_modal_transcript_before_stop_and_final_drain(monkeypatch, capsys, empty
 
         def _transcribe(self, jobs):
             return [
-                ("", "empty_transcript")
-                if empty_middle_turn and job.speaker == 1
+                ("", failure_code)
+                if failure_code and job.speaker == 1
                 else (f"화자 {job.speaker}의 발언", None)
                 for job in jobs
             ]
@@ -141,13 +284,13 @@ def test_modal_transcript_before_stop_and_final_drain(monkeypatch, capsys, empty
                 for sequence, chunk in enumerate(remaining, start=len(chunks)):
                     ws.send_json({"type": "audio.meta", "payload": {"sequence": sequence}})
                     ws.send_bytes(chunk)
-                responses = [ws.receive_json() for _ in range(7 if empty_middle_turn else 8)]
+                responses = [ws.receive_json() for _ in range(7 if failure_code else 8)]
                 assert sum(event["type"] == "audio.ack" for event in responses) == 6
                 transcripts = [
                     event for event in responses if event["type"] == "transcript.committed"
                 ]
-                assert len(transcripts) == (1 if empty_middle_turn else 2)
-                if not empty_middle_turn:
+                assert len(transcripts) == (1 if failure_code else 2)
+                if not failure_code:
                     middle = transcripts[0]
                     assert middle["payload"]["speakerId"] == 1
                     assert middle["payload"]["sequenceNumber"] == 1
@@ -157,7 +300,7 @@ def test_modal_transcript_before_stop_and_final_drain(monkeypatch, capsys, empty
                 assert final["payload"]["content"] == "화자 2의 발언"
                 assert final["payload"]["startedAtMs"] == 5000
                 assert final["payload"]["endedAtMs"] == 6000
-                assert final["payload"]["sequenceNumber"] == (1 if empty_middle_turn else 2)
+                assert final["payload"]["sequenceNumber"] == (1 if failure_code else 2)
                 ws.send_json({"type": "session.stop", "requestId": "stop"})
                 tail = ws.receive_json()
                 assert tail["type"] == "transcript.committed"
@@ -172,7 +315,7 @@ def test_modal_transcript_before_stop_and_final_drain(monkeypatch, capsys, empty
             assert app.state.recording_connections == 0
         assert not runtime.sessions
         assert b"".join(runtime.audio) == b"".join(chunks + remaining)
-        if empty_middle_turn:
+        if failure_code:
             failure = next(
                 line
                 for line in capsys.readouterr().out.splitlines()
@@ -187,7 +330,7 @@ def test_modal_transcript_before_stop_and_final_drain(monkeypatch, capsys, empty
                 "endedAtMs=3000",
                 "durationMs=1000",
                 "reason=silence",
-                "code=empty_transcript",
+                f"code={failure_code}",
             ):
                 assert field in failure
     finally:
@@ -358,3 +501,430 @@ async def test_same_speaker_turns_merge_within_one_second(gap_frames):
 # 실행: 두 연결에 구분되는 PCM을 동시에 보내고 첫 회의 종료 후 두 번째 회의 입력을 이어간다.
 # 기대 결과: 전사·화자·시간축이 회의별로 유지되고 각 연결은 최종 전사 후 정상 종료된다.
 # 실패 조건: 두 번째 회의를 거절하거나 결과가 섞이거나 첫 회의 정리가 다른 회의를 중단한다.
+async def test_modal_concurrent_sessions_keep_transcripts_separate():
+    class Runtime(InferenceRuntime):
+        def __init__(self):
+            self.geometry = {
+                "first_samples": 16000,
+                "chunk_samples": 16000,
+                "frame_samples": 160,
+                "mel_step": 100,
+            }
+            self.metadata = {"test": True}
+            self.audio = {}
+            self.start_runtime()
+
+        async def diarize(self, session, pcm, *, last):
+            self.audio.setdefault(session.start.meeting_id, []).append(pcm)
+            speaker = pcm[0] - 1
+            return {
+                "active": [
+                    [int(frame % 300 < 100 and i == speaker) for i in range(8)]
+                    for frame in range(session.frames, session.frames + len(pcm) // 320)
+                ],
+                "next_start": session.next_sample + len(pcm) // 2,
+            }
+
+        def _transcribe(self, jobs):
+            return [(f"{job.session.context} 입력 {job.pcm[0]}", None) for job in jobs]
+
+        async def _call_worker(self, request):
+            return {"released": True}
+
+    runtime = Runtime()
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+    server = uvicorn.Server(
+        uvicorn.Config(create_inference_app(runtime), log_level="error", lifespan="off")
+    )
+    serving = asyncio.create_task(server.serve(sockets=[listener]))
+    transcripts = [asyncio.Queue(), asyncio.Queue()]
+    errors = []
+    clients = [
+        adapter_module.ModalSTTClient(
+            f"ws://127.0.0.1:{port}/transcribe", "test", "test", queue.put_nowait, errors.append
+        )
+        for queue in transcripts
+    ]
+    first_pcm, other_pcm = b"\x01" * 96000, b"\x02" * 96000
+
+    async def wait_until(predicate):
+        async with asyncio.timeout(5):
+            while not predicate():
+                await asyncio.sleep(0.01)
+
+    try:
+        async with asyncio.timeout(10):
+            await wait_until(lambda: server.started)
+            await asyncio.gather(
+                clients[0].start(meeting_id=1, recording_session_id=1, context="첫 회의"),
+                clients[1].start(meeting_id=2, recording_session_id=2, context="다른 회의"),
+            )
+            sessions = {session.start.meeting_id: session for session in runtime.sessions.values()}
+            assert set(sessions) == {1, 2}
+            assert sessions[1].key != sessions[2].key
+            await asyncio.gather(clients[0].send_audio(first_pcm), clients[1].send_audio(other_pcm))
+            first, other = await asyncio.gather(*(queue.get() for queue in transcripts))
+            assert (first.content, first.speaker_id, first.started_at_ms, first.ended_at_ms) == (
+                "첫 회의 입력 1",
+                0,
+                0,
+                1000,
+            )
+            assert (other.content, other.speaker_id, other.started_at_ms, other.ended_at_ms) == (
+                "다른 회의 입력 2",
+                1,
+                0,
+                1000,
+            )
+            await clients[0].finish()
+            await wait_until(lambda: sessions[1].key not in runtime.sessions)
+            assert runtime.sessions == {sessions[2].key: sessions[2]}
+            await clients[1].send_audio(other_pcm)
+            continued = await transcripts[1].get()
+            assert (
+                continued.content,
+                continued.speaker_id,
+                continued.started_at_ms,
+                continued.ended_at_ms,
+            ) == ("다른 회의 입력 2", 1, 3000, 4000)
+            await clients[1].send_audio(other_pcm[:32000])
+            await clients[1].finish()
+            tail = await transcripts[1].get()
+            assert (tail.content, tail.speaker_id, tail.started_at_ms, tail.ended_at_ms) == (
+                "다른 회의 입력 2",
+                1,
+                6000,
+                7000,
+            )
+            await wait_until(lambda: not runtime.sessions)
+            assert b"".join(runtime.audio[1]) == first_pcm
+            assert b"".join(runtime.audio[2]) == other_pcm * 2 + other_pcm[:32000]
+            assert all(queue.empty() for queue in transcripts)
+            assert runtime.asr_queue.empty()
+            assert all(session.pending_jobs == 0 for session in sessions.values())
+            assert not errors
+    finally:
+        for client in clients:
+            await client.close()
+        server.should_exit = True
+        await asyncio.wait_for(serving, timeout=5)
+        listener.close()
+        if runtime.asr_task is not None:
+            runtime.asr_task.cancel()
+            await asyncio.gather(runtime.asr_task, return_exceptions=True)
+
+
+# 테스트 이름: test_exclusive_turns_do_not_merge_across_another_speaker
+# 목적: 짧은 화자 전환을 가로질러 같은 PCM을 중복 전사하는 회귀를 막는다.
+# 준비: A 0~1초, B 1~1.6초, A 1.6~3초의 배타적 활동과 실제 PipelineSession.
+# 실행: 음성을 공급하고 EOF까지 처리한다.
+# 기대 결과: ASR 입력은 A 0~1초, B 1~1.6초, A 1.6~3초이며 서로 겹치지 않는다.
+# 실패 조건: A를 0~3초로 병합하거나 B의 입력이 다른 구간에 다시 포함된다.
+async def test_exclusive_turns_do_not_merge_across_another_speaker():
+    class Runtime(InferenceRuntime):
+        def __init__(self):
+            self.geometry = {
+                "first_samples": 16000,
+                "chunk_samples": 16000,
+                "frame_samples": 160,
+                "mel_step": 100,
+            }
+            self.calls = []
+            self.start_runtime()
+
+        async def diarize(self, session, pcm, *, last):
+            return {
+                "active": [
+                    [int(i == (1 if 100 <= frame < 160 else 0)) for i in range(8)]
+                    for frame in range(session.frames, session.frames + len(pcm) // 320)
+                ],
+                "next_start": session.next_sample + len(pcm) // 2,
+            }
+
+        def _transcribe(self, jobs):
+            self.calls.extend(job.pcm for job in jobs)
+            return [(f"화자 {job.speaker}의 발언", None) for job in jobs]
+
+        async def _call_worker(self, request):
+            return {"released": True}
+
+    runtime = Runtime()
+    session = runtime.open(SessionStart(type="session.start", meeting_id=1, recording_session_id=1))
+    pcm = b"\x01" * 32000 + b"\x02" * 19200 + b"\x03" * 44800
+    try:
+        async with asyncio.timeout(5):
+            await session.feed(pcm)
+            await session.finish()
+            results = []
+            while (event := await session.results.get()) is not None:
+                results.append(event)
+            committed = [event for event in results if event["type"] == "segment.committed"]
+            assert [
+                (event["segmentId"], event["speakerId"], event["startedAtMs"], event["endedAtMs"])
+                for event in committed
+            ] == [(0, 0, 0, 1000), (1, 1, 1000, 1600), (2, 0, 1600, 3000)]
+            assert [event["content"] for event in committed] == [
+                "화자 0의 발언",
+                "화자 1의 발언",
+                "화자 0의 발언",
+            ]
+            assert runtime.calls == [
+                pcm[:32000],
+                pcm[32000:51200],
+                pcm[51200:],
+            ]
+            assert [event["type"] for event in results] == ["segment.committed"] * 3 + [
+                "session.ended"
+            ]
+            assert results[-1]["succeededSegments"] == 3
+            assert results[-1]["failedSegments"] == 0
+            assert results[-1]["audioDurationMs"] == 3000
+            assert session.pending_jobs == 0
+    finally:
+        await runtime.release(session)
+        runtime.asr_task.cancel()
+        await asyncio.gather(runtime.asr_task, return_exceptions=True)
+    assert not runtime.sessions
+
+
+# 테스트 이름: test_short_other_speaker_merges_surrounding_turns
+# 목적: 500ms 미만의 다른 화자가 끼어든 A→B→A를 A 한 구간으로 전사해 발언이 잘게 나뉘지 않게 한다.
+# 준비: A 0~1초, B 1~1.3초, A 1.3초~의 배타적 활동과 실제 PipelineSession, ASR 대역.
+# 실행: A 복귀를 1초 이내·초과로 바꿔 PCM을 공급하고 EOF까지 처리한다.
+# 기대 결과: 1초 이내 복귀는 A 0~3초 한 전사와 PCM 전체 1회 입력, 초과 복귀는 앞뒤 A가 분리된다.
+# 실패 조건: A가 둘로 나뉘거나, B가 따로 전사되거나, PCM이 중복 전달되거나, 늦은 복귀까지 병합된다.
+@pytest.mark.parametrize("silence_frames", [0, 80])
+async def test_short_other_speaker_merges_surrounding_turns(silence_frames):
+    class Runtime(InferenceRuntime):
+        def __init__(self):
+            self.geometry = {
+                "first_samples": 16000,
+                "chunk_samples": 16000,
+                "frame_samples": 160,
+                "mel_step": 100,
+            }
+            self.calls = []
+            self.start_runtime()
+
+        async def diarize(self, session, pcm, *, last):
+            def speaker(frame):
+                if 100 <= frame < 130:
+                    return 1
+                if 130 <= frame < 130 + silence_frames:
+                    return None
+                return 0
+
+            return {
+                "active": [
+                    [int(i == speaker(frame)) for i in range(8)]
+                    for frame in range(session.frames, session.frames + len(pcm) // 320)
+                ],
+                "next_start": session.next_sample + len(pcm) // 2,
+            }
+
+        def _transcribe(self, jobs):
+            self.calls.extend(job.pcm for job in jobs)
+            return [(f"화자 {job.speaker}의 발언", None) for job in jobs]
+
+        async def _call_worker(self, request):
+            return {"released": True}
+
+    runtime = Runtime()
+    session = runtime.open(SessionStart(type="session.start", meeting_id=1, recording_session_id=1))
+    total_ms = 3000 + silence_frames * 10
+    pcm = bytes(range(256)) * (total_ms * 32 // 256)
+    try:
+        async with asyncio.timeout(5):
+            await session.feed(pcm)
+            await session.finish()
+            results = []
+            while (event := await session.results.get()) is not None:
+                results.append(event)
+        committed = [event for event in results if event["type"] == "segment.committed"]
+        spans = [
+            (event["speakerId"], event["startedAtMs"], event["endedAtMs"]) for event in committed
+        ]
+        if silence_frames:
+            assert spans == [(0, 0, 1000), (0, 1300 + silence_frames * 10, total_ms)]
+        else:
+            assert spans == [(0, 0, 3000)]
+            assert runtime.calls == [pcm]
+        assert results[-1]["succeededSegments"] == len(committed)
+        assert results[-1]["failedSegments"] == 0
+    finally:
+        await runtime.release(session)
+        runtime.asr_task.cancel()
+        await asyncio.gather(runtime.asr_task, return_exceptions=True)
+
+
+# 테스트 이름: test_speaker_mapping_links_enrolled_speaker_and_holds_mismatched_segment
+# 목적: 등록자·미등록자가 섞인 회의에서 미연결→이름 연결→불일치 구간 보류의 BE 전달 순서를 보호한다.
+# 준비: 실제 Live 앱·Modal adapter·파이프라인을 연결하고 화자 분리·ASR·화자 벡터 추출만 대체한다.
+#       참가자 10·11의 등록 벡터를 보내고, slot 0은 참가자 10, slot 1은 미등록자 음성으로 둔다.
+# 실행: session.start → 17초 PCM → session.stop.
+# 기대 결과: 5초 미만에는 null 매핑과 익명 화자 전사가, 5초 이상에서 0→10 매핑이 전사보다 먼저 온다.
+#            참가자 11에 가까운 slot 0 구간은 speakerId=null이고 매핑은 유지되며 종료가 마지막이다.
+# 실패 조건: 근거 부족 연결, 매핑·전사 순서 역전, 불일치 구간의 매핑 철회·이름 교체, 끝 구간 누락.
+def test_speaker_mapping_links_enrolled_speaker_and_holds_mismatched_segment(monkeypatch):
+    def axis(*values):
+        return [*values, *[0.0] * (192 - len(values))]
+
+    # PCM 첫 바이트로 구간의 목소리를 구분한다. 3은 참가자 11에 더 가까운 slot 0 구간이다.
+    voices = {1: axis(1.0), 2: axis(0.0, 0.0, 1.0), 3: axis(0.3, 0.95)}
+    speech = {0: 1, 1: 1, 2: 1, 5: 2, 6: 2, 9: 1, 10: 1, 11: 1, 14: 3}
+
+    class Runtime(InferenceRuntime):
+        embedding_version = "test-v1"
+
+        def __init__(self):
+            self.geometry = {
+                "first_samples": 16000,
+                "chunk_samples": 16000,
+                "frame_samples": 160,
+                "mel_step": 100,
+            }
+            self.metadata = {"test": True}
+            self.start_runtime()
+
+        async def diarize(self, session, pcm, *, last):
+            second = session.frames // 100
+            slot = 1 if speech.get(second) == 2 else 0
+            row = [int(second in speech and i == slot) for i in range(8)]
+            return {
+                "active": [row] * (len(pcm) // 320),
+                "next_start": session.next_sample + len(pcm) // 2,
+            }
+
+        def _transcribe(self, jobs):
+            return [(f"구간 {job.segment_id}", None) for job in jobs]
+
+        def embed(self, pcm):
+            return voices[pcm[0]]
+
+        async def _call_worker(self, request):
+            return {"released": True}
+
+    runtime = Runtime()
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+    server = uvicorn.Server(
+        uvicorn.Config(create_inference_app(runtime), log_level="error", lifespan="off")
+    )
+    thread = Thread(target=server.run, kwargs={"sockets": [listener]}, daemon=True)
+    thread.start()
+
+    async def local_connect(url, **kwargs):
+        async with asyncio.timeout(5):
+            while not server.started:
+                await asyncio.sleep(0.01)
+        return await connect(f"ws://127.0.0.1:{port}/transcribe", **kwargs)
+
+    monkeypatch.setattr(adapter_module, "connect", local_connect)
+    monkeypatch.setattr("meety_ai.live.ModalSTTClient", adapter_module.ModalSTTClient)
+    app = create_live_app()
+    try:
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/live-meeting") as ws:
+                ws.send_json(
+                    {
+                        "type": "session.start",
+                        "requestId": "start",
+                        "meetingId": 1,
+                        "recordingSessionId": 1,
+                        "participantCount": 3,
+                        "participants": [
+                            {
+                                "teamMemberId": 10,
+                                "name": "참가자 A",
+                                "speakerEmbedding": {
+                                    "modelVersion": "test-v1",
+                                    "embedding": axis(1.0),
+                                },
+                            },
+                            {
+                                "teamMemberId": 11,
+                                "name": "참가자 B",
+                                "speakerEmbedding": {
+                                    "modelVersion": "test-v1",
+                                    "embedding": axis(0.0, 1.0),
+                                },
+                            },
+                            {"teamMemberId": None, "name": "외부 참가자"},
+                        ],
+                    }
+                )
+                assert ws.receive_json()["type"] == "session.ready"
+                for second in range(17):
+                    ws.send_json({"type": "audio.meta", "payload": {"sequence": second}})
+                    ws.send_bytes(bytes([speech.get(second, 0)]) * 32000)
+                ws.send_json({"type": "session.stop", "requestId": "stop"})
+                events = []
+                while not events or events[-1]["type"] != "session.ended":
+                    event = ws.receive_json()
+                    if event["type"] != "audio.ack":
+                        events.append(event)
+
+        def mapping(*pairs):
+            return [{"speakerId": slot, "teamMemberId": member} for slot, member in pairs]
+
+        assert [
+            event["payload"]["mappings"]
+            if event["type"] == "speaker.mapping.updated"
+            else (
+                event["payload"]["sequenceNumber"],
+                event["payload"]["speakerId"],
+                event["payload"]["startedAtMs"],
+                event["payload"]["endedAtMs"],
+            )
+            for event in events[:-1]
+        ] == [
+            mapping((0, None)),
+            (0, 0, 0, 3000),
+            mapping((0, None), (1, None)),
+            (1, 1, 5000, 7000),
+            mapping((0, 10), (1, None)),
+            (2, 0, 9000, 12000),
+            (3, None, 14000, 15000),
+        ]
+        assert all(event["meetingId"] == event["recordingSessionId"] == 1 for event in events)
+        assert events[-1]["payload"]["audioDurationMs"] == 17000
+        assert app.state.recording_connections == 0
+        assert not runtime.sessions
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)
+        listener.close()
+
+
+# 테스트 이름: test_context_echo_and_overlong_text_fail_segment_but_keep_real_speech
+# 목적: 무음 구간에서 ASR이 회의 맥락을 복사하거나 음성 길이로 말할 수 없는 분량을 출력하면
+#       확정 전사로 노출되지 않게 보호한다(#135, #140).
+# 준비: 여러 줄 맥락. 0.72초 구간의 문장부호만 바꾼 맥락 전문 출력, 5초 구간의 줄을 걸친 맥락 일부
+#       복사 출력, 0.72초 구간의 맥락에 없는 반복 출력, 맥락 단어가 섞인 짧은 발화,
+#       정상 속도로 맥락 한 줄을 인용한 긴 발화 출력.
+# 실행: pipeline._failure_code(출력, 맥락, 구간 초, "stop")을 각 출력에 호출한다.
+# 기대 결과: 전문·일부 복사는 "context_echo", 반복 출력은 "text_rate_exceeded",
+#           실제 발화 두 개는 None.
+# 실패 조건: 맥락 복사·과생성이 정상 전사로 통과하거나, 맥락을 인용한 정상 발화가 버려질 때.
+def test_context_echo_and_overlong_text_fail_segment_but_keep_real_speech():
+    context = "\n".join(
+        [
+            "회의 주제: 3분기 서비스 로드맵 점검과 실시간 전사 품질 개선 방안 논의",
+            "참가자: 기획, 백엔드, 프론트엔드, AI 담당",
+            "주요 용어: Meety, 화자 분리, Nemotron, Qwen ASR, Modal, 스테이징 배포",
+            "안건: 무음 구간 처리 기준, 회의 요약 품질 지표, 다음 스프린트 일정 확정",
+        ]
+    )
+    echo = context.replace("\n", " ").replace(":", "").replace(",", "")
+    quote = "오늘 안건은 무음 구간 처리 기준, 회의 요약 품질 지표, 다음 스프린트 일정 확정입니다"
+
+    assert _failure_code(echo, context, 0.72, "stop") == "context_echo"
+    # staging에서 관찰된 것처럼 줄 경계를 걸쳐 맥락 가운데를 복사하면 속도 기준에 걸리지 않는다.
+    partial = "백엔드, 프론트엔드, AI 담당 주요 용어: Meety, 화자 분리, Nemotron"
+    assert _failure_code(partial, context, 5.0, "stop") == "context_echo"
+    assert _failure_code("네 " * 40, context, 0.72, "stop") == "text_rate_exceeded"
+    assert _failure_code("네 그럼 로드맵부터 볼까요", context, 0.72, "stop") is None
+    assert _failure_code(quote, context, 5.0, "stop") is None

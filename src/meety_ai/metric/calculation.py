@@ -21,12 +21,11 @@ def union_duration(segments: list[TranscriptionSegment]) -> int:
 def select_ranges(
     segments: list[TranscriptionSegment], ranges: list[SegmentRange]
 ) -> list[TranscriptionSegment]:
-    positions = {segment.segment_id: index for index, segment in enumerate(segments)}
     selected = set()
     for interval in ranges:
-        start = positions.get(interval.start_segment_id)
-        end = positions.get(interval.end_segment_id)
-        if start is None or end is None or end < start:
+        start = interval.start_index
+        end = interval.end_index
+        if not 0 <= start <= end < len(segments):
             raise ValueError("모델이 존재하지 않거나 역순인 전사 범위를 반환했습니다.")
         selected.update(range(start, end + 1))
     return [segment for index, segment in enumerate(segments) if index in selected]

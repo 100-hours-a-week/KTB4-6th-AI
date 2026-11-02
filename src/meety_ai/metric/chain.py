@@ -28,10 +28,10 @@ METRIC_SYSTEM_PROMPT = """회의 요약과 전사를 근거로 안건 및 업무
 명확한 잡담 근거가 없으면 주변의 업무 흐름에 포함하세요.
 어색하거나 짧은 발화도 앞뒤 맥락으로 가장 가까운 안건에 배정하세요.
 업무와 잡담 또는 여러 업무 안건이 섞인 구간은 모든 해당 분류에 중복 포함하세요.
-각 범위는 전사에 있는 startSegmentId와 endSegmentId로 표현하며 양 끝 구간을 포함합니다.
-범위의 순서는 숫자 ID 크기가 아닌 제공된 전사 순서입니다.
+각 범위는 전사에 있는 index를 startIndex와 endIndex로 표현하며 양 끝 구간을 포함합니다.
+인덱스는 제공된 전사 순서대로 0부터 시작합니다. startIndex는 endIndex 이하여야 합니다.
 연속 구간은 하나의 범위로 압축하고 떨어진 논의는 여러 범위로 표현하세요.
-시각이나 개별 ID 목록을 생성하지 마세요. 실제 입력에 있는 ID만 사용하세요.
+시각이나 개별 인덱스 목록을 생성하지 마세요. 실제 입력에 있는 인덱스만 사용하세요.
 모든 전사 구간을 검토하고 안건 또는 잡담에 빠짐없이 배정하세요.
 분류 불가 항목은 만들지 마세요. 전체 흐름이 바뀌면 범위를 나누어 각각 배정하세요.
 offTopic에는 잡담 범위와 판단 이유를 기록하고, 잡담이 없으면 빈 목록을 반환하세요.
@@ -63,6 +63,13 @@ def create_metric_chain(model: ChatOpenAI):
             "extra_body": {**(model.extra_body or {}), "reasoning": {"effort": "xhigh"}},
         }
     )
-    return RunnableLambda(build_metric_prompt) | metric_model.with_structured_output(
-        MetricClassification, method="json_schema"
-    )
+
+    def build_chain(inputs):
+        schema = MetricClassification.model_json_schema()
+        for field in schema["$defs"]["SegmentRange"]["properties"].values():
+            field["maximum"] = inputs["segment_count"] - 1
+        return RunnableLambda(build_metric_prompt) | metric_model.with_structured_output(
+            schema, method="json_schema", strict=True
+        )
+
+    return RunnableLambda(build_chain)
