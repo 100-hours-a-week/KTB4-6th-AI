@@ -31,11 +31,17 @@ class ChatRetrievalError(Exception):
 
 
 async def get_data[T: Message](
-    client: httpx.AsyncClient, path: str, params: dict, response_model: type[T], headers: dict
+    client: httpx.AsyncClient,
+    path: str,
+    params: dict,
+    response_model: type[T],
+    headers: dict,
+    *,
+    prefix: str = QNA_API_PREFIX,
 ) -> T:
     """내부 회의 조회 API를 호출하고 Backend 오류를 조회 실패 또는 도구 오류로 구분한다."""
     params = {key: value for key, value in params.items() if value is not None}
-    url = QNA_API_PREFIX + path
+    url = prefix + path
     log = logger.bind(path=url)
     for attempt in (1, 2):
         try:

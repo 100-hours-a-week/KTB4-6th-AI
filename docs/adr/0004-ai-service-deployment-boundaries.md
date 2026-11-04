@@ -6,6 +6,8 @@ Accepted — 2026-09-09
 
 QnA는 [ADR-0010](0010-backend-ai-chatbot-http-200.md)에 따라 회의 분석 AI의 HTTP API로 제공한다. QnA의 통신 방식과 배포 위치는 ADR-0010을 따르며, 나머지 실행·배포 경계는 유지한다.
 
+GPU 추론 단위는 화자 분리뿐 아니라 실시간 전사([ADR-0012](0012-modal-realtime-stt-serving.md))와 화자 벡터 추출([ADR-0015](0015-enrollment-speaker-mapping.md))까지 포함한다. 실시간 AI는 전사 모델을 직접 실행하지 않고 Modal로 음성을 중계한다.
+
 ---
 
 ## Context

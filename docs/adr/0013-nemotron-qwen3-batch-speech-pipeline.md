@@ -4,6 +4,8 @@
 
 Accepted
 
+이 ADR에서 제외한 참가자 실명 연결은 [ADR-0015](0015-enrollment-speaker-mapping.md)를 따른다.
+
 ---
 
 ## Context

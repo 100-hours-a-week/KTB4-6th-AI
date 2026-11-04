@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from langchain_openai import ChatOpenAI
 
 from meety_ai.app import create_app
+from meety_ai.assistant.router import AssistantNotReadyError, assistant_router, handle_not_ready
 from meety_ai.chat.router import chat_router
 from meety_ai.diarization.router import diarization_router
 from meety_ai.metric.chain import create_metric_chain
@@ -37,6 +38,13 @@ def create_analysis_app() -> FastAPI:
                 timeout=settings.chat_timeout_seconds,
                 max_retries=3,
             )
+            app.state.assistant_model = ChatOpenAI(
+                model=settings.chat_model,
+                api_key=settings.openrouter_api_key,
+                base_url="https://openrouter.ai/api/v1",
+                timeout=settings.assistant_timeout_seconds,
+                max_retries=3,
+            )
             async with httpx.AsyncClient(
                 base_url=settings.backend_base_url,
                 headers={"X-Internal-Api-Key": settings.internal_api_key.get_secret_value()}
@@ -60,6 +68,8 @@ def create_analysis_app() -> FastAPI:
     )
     app.state.summary_chain = create_summary_chain(model)
     app.state.metric_chain = create_metric_chain(model)
+    app.add_exception_handler(AssistantNotReadyError, handle_not_ready)
+    app.include_router(assistant_router)
     app.include_router(chat_router)
     app.include_router(summary_router)
     app.include_router(diarization_router)

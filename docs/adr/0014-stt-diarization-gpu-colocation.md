@@ -4,6 +4,8 @@
 
 Accepted
 
+화자 벡터 추출을 위해 ReDimNet2+를 같은 GPU에 추가한 결정과 측정은 [ADR-0015](0015-enrollment-speaker-mapping.md)를 따른다. Nemotron과 Qwen의 배치 결정과 worker당 동시 회의 한도 10개는 유지한다.
+
 ---
 
 ## Context
