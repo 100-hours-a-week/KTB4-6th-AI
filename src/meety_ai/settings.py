@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     internal_api_key: SecretStr | None = Field(default=None, validation_alias="INTERNAL_API_KEY")
     chat_model: str = "openai/gpt-6-luna"
     chat_timeout_seconds: float = Field(default=60.0, gt=0)
+    # BE도 180초에 끊으므로 AI가 먼저 정확한 실패 코드를 보내도록 더 짧게 둔다.
+    assistant_timeout_seconds: float = Field(default=175.0, gt=0)
 
     summary_model: str = "openai/gpt-6-luna"
     summary_timeout_seconds: float = Field(default=180.0, gt=0)
