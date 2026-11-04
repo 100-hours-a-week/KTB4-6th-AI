@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded by [ADR-0012](0012-modal-realtime-stt-serving.md)
 
 ---
 

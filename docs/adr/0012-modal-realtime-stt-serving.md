@@ -4,6 +4,8 @@
 
 Accepted
 
+본문의 실시간 AI 디코딩 표현은 [ADR-0011](0011-frontend-pcm-live-audio.md)과 맞지 않는다. 실시간 AI는 FE가 보낸 PCM을 디코딩 없이 Modal로 전달한다.
+
 ---
 
 ## Context
