@@ -35,9 +35,12 @@ logger = logging.getLogger(__name__)
 ASR_MODEL = "TeamUNIVA/qwen3_asr_1.7b_ko"
 ASR_REVISION = "3e66f586033753589c3effeb2c8cbce46a1ddabb"
 NEMOTRON_REVISION = "f667ed73aee57d40cc39428eb768b4fd87a0a29e"
-# shortcut: GPU당 10개는 5분 부하로만 검증, 장시간 측정 후 한도를 재검토한다.
-MAX_SESSIONS = 10
-BATCH_SIZE = 8
+# 2026-11-04 A10 실측: 실제 맥락 383자로 28개까지 p95 10초 이내. 컨테이너별 속도 편차와
+# 최대 800자 맥락을 감안해 24개로 둔다.
+# shortcut: 5분 녹음 하나를 시간만 밀어 측정했다. 장시간·다른 녹음으로 한도를 재검토한다.
+MAX_SESSIONS = 24
+# 부하가 늘면 배치가 저절로 커진다. 8에서 16으로 올려 같은 맥락 조건의 한계가 24→28개가 됐다.
+BATCH_SIZE = 16
 BATCH_WAIT_SECONDS = 0.05
 QUEUE_WAIT_SECONDS = 5
 SEND_TIMEOUT_SECONDS = 10
@@ -254,8 +257,33 @@ class PipelineSession:
             self._slice(lower, upper),
             time.perf_counter(),
         )
+        self.pending_jobs += 1
+        self.drained.clear()
+        try:
+            async with asyncio.timeout(QUEUE_WAIT_SECONDS):
+                await self.runtime.asr_queue.put(job)
+        except TimeoutError:
+            # ASR 처리량을 넘으면 회의 대신 이 구간만 버린다(#150). segment.failed를 바로 보내면
+            # 대기열에 남은 앞 구간보다 먼저 나가 순번이 깨지므로 번호도 결과도 쓰지 않는다.
+            self.job_done()
+            logger.warning(
+                "asr_segment_dropped meetingId=%s recordingSessionId=%s segmentId=%s "
+                "speakerId=%s startedAtMs=%s endedAtMs=%s code=asr_queue_full",
+                self.start.meeting_id,
+                self.start.recording_session_id,
+                job.segment_id,
+                speaker,
+                lower * 1000 // SAMPLE_RATE,
+                upper * 1000 // SAMPLE_RATE,
+            )
+            return
+        except BaseException:
+            self.job_done()
+            raise
+        self.segments += 1
         if self.mapper.enabled:
-            # ASR 대기와 겹치도록 구간을 닫는 즉시 같은 PCM으로 화자 벡터 추출을 시작한다.
+            # 대기열에 들어간 구간만 ASR 대기와 겹치도록 같은 PCM으로 화자 벡터 추출을 시작한다.
+            # put과 등록 사이에 await가 없어 결과가 등록보다 먼저 나갈 수 없다.
             loop = asyncio.get_running_loop()
             self.embeddings[job.segment_id] = (
                 loop.run_in_executor(
@@ -264,15 +292,6 @@ class PipelineSession:
                 (upper - lower) / SAMPLE_RATE,
                 loop.time() + EMBEDDING_WAIT_SECONDS,
             )
-        self.pending_jobs += 1
-        self.drained.clear()
-        try:
-            async with asyncio.timeout(QUEUE_WAIT_SECONDS):
-                await self.runtime.asr_queue.put(job)
-        except BaseException:
-            self.job_done()
-            raise
-        self.segments += 1
 
     async def attribute(self, message: dict) -> list[dict]:
         """결과 큐 순서대로 화자 근거를 누적하고, 매핑 변경을 해당 전사보다 먼저 보낸다."""
@@ -373,7 +392,8 @@ class InferenceRuntime:
                 max_num_seqs=BATCH_SIZE,
                 max_inference_batch_size=BATCH_SIZE,
                 max_new_tokens=1024,
-                enforce_eager=True,
+                # CUDA graph로 kernel 전달 CPU 비용을 줄인다(같은 16개에서 p95 8.40→5.33초).
+                enforce_eager=False,
                 seed=0,
                 enable_prefix_caching=False,
                 mm_processor_cache_gb=0,
@@ -384,6 +404,8 @@ class InferenceRuntime:
                 "asrRevision": Path(snapshot).name,
                 "nemotronRevision": ready["revision"],
                 "nemotronTransformers": ready["transformers"],
+                # 배포 뒤 snapshot 복원 컨테이너에도 graph가 녹화돼 있는지 확인한다.
+                "nemotronCudaGraphs": ready["cudaGraphs"],
                 "geometry": self.geometry,
                 "sourceSha256": {
                     name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
@@ -427,7 +449,8 @@ class InferenceRuntime:
     def start_runtime(self) -> None:
         """모델과 별개로 worker의 비동기 실행 상태를 준비한다."""
         self.sessions: dict[str, PipelineSession] = {}
-        self.asr_queue: asyncio.Queue[ASRJob] = asyncio.Queue(maxsize=16)
+        # 배치 두 번 분량. 이보다 오래 쌓이면 어차피 p95 10초를 넘는다.
+        self.asr_queue: asyncio.Queue[ASRJob] = asyncio.Queue(maxsize=BATCH_SIZE * 2)
         self.diar_lock = asyncio.Lock()
         self.failed_event = asyncio.Event()
         self.failure: str | None = None

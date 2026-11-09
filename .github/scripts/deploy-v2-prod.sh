@@ -47,7 +47,7 @@ umask 077
   echo "TZ=Asia/Seoul"
   echo "MEETY_BACKEND_BASE_URL=$BACKEND_BASE_URL"
   echo "INTERNAL_API_KEY=$INTERNAL_API_KEY"
-  echo "MEETY_MAX_RECORDING_CONNECTIONS=100"
+  echo "MEETY_MAX_RECORDING_CONNECTIONS=250"
   /snap/bin/aws ssm get-parameters-by-path --region "$REGION" --path "$PARAM_PREFIX/ai" \
     --with-decryption --query 'Parameters[].[Name,Value]' --output text \
     | awk -F'\t' '{ n = split($1, p, "/"); print p[n] "=" $2 }'
