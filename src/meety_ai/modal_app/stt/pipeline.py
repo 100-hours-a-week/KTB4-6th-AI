@@ -257,8 +257,33 @@ class PipelineSession:
             self._slice(lower, upper),
             time.perf_counter(),
         )
+        self.pending_jobs += 1
+        self.drained.clear()
+        try:
+            async with asyncio.timeout(QUEUE_WAIT_SECONDS):
+                await self.runtime.asr_queue.put(job)
+        except TimeoutError:
+            # ASR 처리량을 넘으면 회의 대신 이 구간만 버린다(#150). segment.failed를 바로 보내면
+            # 대기열에 남은 앞 구간보다 먼저 나가 순번이 깨지므로 번호도 결과도 쓰지 않는다.
+            self.job_done()
+            logger.warning(
+                "asr_segment_dropped meetingId=%s recordingSessionId=%s segmentId=%s "
+                "speakerId=%s startedAtMs=%s endedAtMs=%s code=asr_queue_full",
+                self.start.meeting_id,
+                self.start.recording_session_id,
+                job.segment_id,
+                speaker,
+                lower * 1000 // SAMPLE_RATE,
+                upper * 1000 // SAMPLE_RATE,
+            )
+            return
+        except BaseException:
+            self.job_done()
+            raise
+        self.segments += 1
         if self.mapper.enabled:
-            # ASR 대기와 겹치도록 구간을 닫는 즉시 같은 PCM으로 화자 벡터 추출을 시작한다.
+            # 대기열에 들어간 구간만 ASR 대기와 겹치도록 같은 PCM으로 화자 벡터 추출을 시작한다.
+            # put과 등록 사이에 await가 없어 결과가 등록보다 먼저 나갈 수 없다.
             loop = asyncio.get_running_loop()
             self.embeddings[job.segment_id] = (
                 loop.run_in_executor(
@@ -267,15 +292,6 @@ class PipelineSession:
                 (upper - lower) / SAMPLE_RATE,
                 loop.time() + EMBEDDING_WAIT_SECONDS,
             )
-        self.pending_jobs += 1
-        self.drained.clear()
-        try:
-            async with asyncio.timeout(QUEUE_WAIT_SECONDS):
-                await self.runtime.asr_queue.put(job)
-        except BaseException:
-            self.job_done()
-            raise
-        self.segments += 1
 
     async def attribute(self, message: dict) -> list[dict]:
         """결과 큐 순서대로 화자 근거를 누적하고, 매핑 변경을 해당 전사보다 먼저 보낸다."""
@@ -433,7 +449,8 @@ class InferenceRuntime:
     def start_runtime(self) -> None:
         """모델과 별개로 worker의 비동기 실행 상태를 준비한다."""
         self.sessions: dict[str, PipelineSession] = {}
-        self.asr_queue: asyncio.Queue[ASRJob] = asyncio.Queue(maxsize=16)
+        # 배치 두 번 분량. 이보다 오래 쌓이면 어차피 p95 10초를 넘는다.
+        self.asr_queue: asyncio.Queue[ASRJob] = asyncio.Queue(maxsize=BATCH_SIZE * 2)
         self.diar_lock = asyncio.Lock()
         self.failed_event = asyncio.Event()
         self.failure: str | None = None
