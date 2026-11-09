@@ -384,6 +384,8 @@ class InferenceRuntime:
                 "asrRevision": Path(snapshot).name,
                 "nemotronRevision": ready["revision"],
                 "nemotronTransformers": ready["transformers"],
+                # 배포 뒤 snapshot 복원 컨테이너에도 graph가 녹화돼 있는지 확인한다.
+                "nemotronCudaGraphs": ready["cudaGraphs"],
                 "geometry": self.geometry,
                 "sourceSha256": {
                     name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
