@@ -7,7 +7,7 @@ from fastapi import APIRouter, WebSocket
 from fastapi.responses import JSONResponse
 
 from meety_ai.recording.connection import RecordingConnection
-from meety_ai.stt.context import generate_stt_context
+from meety_ai.stt.context import extract_transcript_terms, generate_stt_context
 
 logger = structlog.stdlib.get_logger(__name__)
 
@@ -38,6 +38,7 @@ async def start_recording_session(websocket: WebSocket) -> None:
         websocket,
         state.stt_client_factory,
         partial(generate_stt_context, model=state.stt_context_model, client=state.backend_client),
+        partial(extract_transcript_terms, model=state.stt_context_model),
         state.settings.stt_context_timeout_seconds,
     )
     websocket.app.state.recording_connections += 1

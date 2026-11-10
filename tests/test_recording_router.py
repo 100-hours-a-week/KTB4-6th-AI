@@ -8,6 +8,8 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
+from langchain_core.messages import AIMessage
+from langchain_core.runnables import RunnableLambda
 from pydantic import ValidationError
 from starlette.testclient import WebSocketDenialResponse
 from starlette.websockets import WebSocketDisconnect
@@ -836,11 +838,11 @@ def test_stt_context_generated_from_related_meetings(fake_speechmatics_client):
             data = {"summary": {"summaryId": 3, "status": "COMPLETED", "content": "Qwen3 맥락"}}
         return httpx.Response(200, json={"success": True, "data": data, "error": None})
 
-    generated = "회의: 주간 STT 회의\n참가자: 홍길동\n용어: Qwen3, Modal"
+    generated = "회의 제목: 주간 STT 회의\n참가자: 홍길동\n용어: Qwen3, Modal"
     app = create_live_app()
     with TestClient(app) as client:
         app.state.stt_context_model = FakeListChatModel(
-            responses=['{"meetingIds": [7]}', generated]
+            responses=['{"meetingIds": [7]}', "Qwen3, Modal"]
         )
         app.state.backend_client = httpx.AsyncClient(
             base_url="https://backend.test",
@@ -883,6 +885,122 @@ def test_stt_context_generated_from_related_meetings(fake_speechmatics_client):
             assert "X-Ai-Request-Id" not in request.headers
         assert stt_client.fed == [b"\x01\x00" * 8000]
         assert stt_client.closed
+
+
+# 테스트 이름: test_transcript_context_refresh_keeps_recording_alive
+# 목적: 전사 기반 용어 교체·추출 실패·종료가 녹음과 전사 전달을 막지 않는지 보호한다.
+# 준비: 실제 오디오 시각을 가진 확정 전사와, 대기·성공·실패·빈 결과를 내는 추출 모델.
+# 실행: 시작 → 3분 갱신 대기 중 전사·오디오 → 8분 실패 → 13분 교체 → 18분 제거 → 종료.
+# 기대 결과: 최근 5분만 추출하고 실패 시 문맥 유지, 성공 시 교체하며 종료 시 추출을 취소한다.
+# 실패 조건: LLM 대기가 전사를 막거나, 실패가 세션을 끝내거나, 종료 후에도 갱신한다.
+def test_transcript_context_refresh_keeps_recording_alive(fake_speechmatics_client):
+    prompts = []
+    metadata = []
+    first_started, last_started, cancelled = Event(), Event(), Event()
+    release_first = asyncio.Event()
+
+    async def respond(prompt, config):
+        prompts.append(prompt.to_messages()[-1].content)
+        metadata.append(config["metadata"])
+        match len(prompts):
+            case 1:
+                first_started.set()
+                await release_first.wait()
+                return AIMessage(content="스레드, HikariCP")
+            case 2:
+                raise RuntimeError("용어 추출 실패")
+            case 3:
+                return AIMessage(content="OpenSearch")
+            case 4:
+                return AIMessage(content="")
+            case _:
+                last_started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled.set()
+
+    app = create_live_app()
+    with TestClient(app) as client, capture_logs() as logs:
+        app.state.stt_context_model = RunnableLambda(respond)
+        with client.websocket_connect(WEBSOCKET_URL) as ws:
+            ws.send_json(
+                {
+                    **start_message,
+                    "title": "백엔드 회의",
+                    "participantCount": 1,
+                    "participants": [{"teamMemberId": 1, "name": "홍길동"}],
+                }
+            )
+            assert ws.receive_json()["type"] == "session.ready"
+            ws.send_json(meta_message)
+            ws.send_bytes(b"\x01\x00" * 8000)
+            assert ws.receive_json()["type"] == "audio.ack"
+            stt_client = fake_speechmatics_client[0]
+            base_context = "회의 제목: 백엔드 회의\n참가자: 홍길동"
+            assert stt_client.start_kwargs["context"] == base_context
+            sequences = []
+
+            def emit(content, ended_at_ms):
+                client.portal.call(
+                    stt_client.on_transcript,
+                    STTTranscript(
+                        content=content, started_at_ms=ended_at_ms - 500, ended_at_ms=ended_at_ms
+                    ),
+                )
+                response = ws.receive_json()
+                assert response["type"] == "transcript.committed"
+                assert response["payload"]["content"] == content
+                sequences.append(response["payload"]["sequenceNumber"])
+
+            def wait_for(predicate):
+                deadline = time.monotonic() + 5
+                while not predicate() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                assert predicate()
+
+            emit("첫 구간", 179_000)
+            assert prompts == []
+            emit("커넥션 풀과 트렌드", 180_000)
+            assert first_started.wait(5)
+            emit("다음 추출까지 보관할 발언", 240_000)
+            assert len(prompts) == 1
+            ws.send_json({"type": "audio.meta", "payload": {"sequence": 1}})
+            ws.send_bytes(b"\x02\x00" * 8000)
+            assert ws.receive_json()["type"] == "audio.ack"
+            client.portal.call(release_first.set)
+            wait_for(lambda: len(stt_client.contexts) == 1)
+            assert stt_client.contexts[-1] == base_context + "\n용어: 스레드, HikariCP"
+
+            emit("8분 발언", 480_000)
+            wait_for(lambda: any(log["event"] == "stt_context_failed" for log in logs))
+            assert len(stt_client.contexts) == 1
+            assert "첫 구간" not in prompts[1]
+            assert "커넥션 풀과 트렌드" not in prompts[1]
+            assert "다음 추출까지 보관할 발언" in prompts[1]
+
+            emit("검색 주제로 전환", 780_000)
+            wait_for(lambda: len(stt_client.contexts) == 2)
+            assert stt_client.contexts[-1] == base_context + "\n용어: OpenSearch"
+            assert "다음 추출까지 보관할 발언" not in prompts[2]
+            assert "HikariCP" not in prompts[2]
+
+            emit("새 용어 없는 발언", 1_080_000)
+            wait_for(lambda: len(stt_client.contexts) == 3)
+            assert stt_client.contexts[-1] == base_context
+            emit("종료 직전 발언", 1_380_000)
+            assert last_started.wait(5)
+            ws.send_json(stop_message)
+            assert ws.receive_json()["type"] == "session.ended"
+            assert cancelled.wait(5)
+
+        assert sequences == list(range(7))
+        assert len(stt_client.contexts) == 3
+        assert all(len(context) <= 800 for context in stt_client.contexts)
+        assert all(
+            item["meeting_id"] == 1 and item["recording_session_id"] == 1 for item in metadata
+        )
+        assert stt_client.finished and stt_client.closed
 
 
 # 테스트 이름: test_stt_context_retrieval_denied_keeps_default_context
