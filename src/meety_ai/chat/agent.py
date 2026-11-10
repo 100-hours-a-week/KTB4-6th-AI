@@ -12,6 +12,7 @@ from openai import APITimeoutError, BadRequestError
 
 from meety_ai.chat.schemas import ChatAnswer, ChatRequest
 from meety_ai.chat.tools import ChatRetrievalError, create_qna_tools
+from meety_ai.core.errors import TaskError
 
 SYSTEM_PROMPT = """
 회의 자료를 근거로 참가자들의 질문에 한국어로 답하세요.
@@ -32,10 +33,8 @@ citations에는 실제 제공된 자료의 sourceType(transcript/summary)과 mee
 근거가 없으면 citations는 빈 배열입니다.""".strip()
 
 
-class ChatGenerationError(Exception):
-    def __init__(self, code: str, message: str):
-        self.code = code
-        super().__init__(message)
+class ChatGenerationError(TaskError):
+    pass
 
 
 def _build_messages(request: ChatRequest) -> list[HumanMessage | AIMessage]:
