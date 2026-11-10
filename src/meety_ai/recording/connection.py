@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable
 
 import sentry_sdk
@@ -24,6 +25,7 @@ from meety_ai.recording.schemas import (
 from meety_ai.recording.session import RecordingSession, SessionProtocolError
 from meety_ai.recording.transcript import TranscriptQueue, send_message, send_transcripts
 from meety_ai.stt.client import STTClient, STTProviderError
+from meety_ai.stt.context import build_stt_context
 from meety_ai.stt.schemas import SpeakerProfile, STTSpeakerMapping, STTTranscript
 
 logger = structlog.stdlib.get_logger(__name__)
@@ -35,6 +37,10 @@ STT_STOP_TIMEOUT = 30
 STT_SEND_TIMEOUT = 10
 # Modal 기동 대기 240초 분량의 16kHz mono PCM을 보관한다.
 MAX_PENDING_AUDIO_BYTES = 240 * 32000
+FIRST_CONTEXT_UPDATE_MS = 3 * 60 * 1000
+CONTEXT_UPDATE_INTERVAL_MS = 5 * 60 * 1000
+TRANSCRIPT_CONTEXT_WINDOW_MS = 5 * 60 * 1000
+MAX_TRANSCRIPT_CONTEXT_CHARS = 10_000
 
 
 class RecordingConnection:
@@ -44,13 +50,20 @@ class RecordingConnection:
         self,
         websocket: WebSocket,
         stt_client_factory: Callable[..., STTClient],
-        generate_context: Callable[[SessionStart], Awaitable[str]],
+        generate_context: Callable[[SessionStart], Awaitable[list[str]]],
+        extract_terms: Callable[[SessionStart, str], Awaitable[list[str]]],
         context_timeout_seconds: float,
     ) -> None:
         self._websocket = websocket
         self._generate_context = generate_context
+        self._extract_terms = extract_terms
         self._context_timeout = context_timeout_seconds
         self._context_task: asyncio.Task[None] | None = None
+        self._context_update = asyncio.Event()
+        self._recent_transcripts: deque[STTTranscript] = deque()
+        self._transcript_chars = 0
+        self._latest_transcript_ms = 0
+        self._next_context_ms = FIRST_CONTEXT_UPDATE_MS
         self._stt_ready = asyncio.Event()
         self._transcript_queue: TranscriptQueue = asyncio.Queue()
         self._audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
@@ -163,6 +176,7 @@ class RecordingConnection:
         # 입력 종료를 알린 Modal 세션에는 맥락 갱신을 보내지 않는다.
         if self._context_task is not None:
             self._context_task.cancel()
+            await asyncio.gather(self._context_task, return_exceptions=True)
         async with asyncio.timeout(STT_STOP_TIMEOUT):
             await self._audio_queue.put(None)
             await self._audio_task
@@ -245,19 +259,10 @@ class RecordingConnection:
 
     async def _forward_audio(self, event: SessionStart) -> None:
         try:
-            context = "\n".join(
-                f"{label}: {value}"
-                for label, value in (
-                    ("회의 제목", event.title),
-                    ("목적", event.purpose),
-                    ("비고", event.notes),
-                )
-                if value
-            )
             await self._stt_client.start(
                 meeting_id=event.meeting_id,
                 recording_session_id=event.recording_session_id,
-                context=context,
+                context=build_stt_context(event),
                 profiles=[
                     SpeakerProfile(
                         team_member_id=participant.team_member_id,
@@ -279,25 +284,60 @@ class RecordingConnection:
             self._on_error(error)
 
     async def _apply_context(self, event: SessionStart) -> None:
-        """생성한 맥락을 STT 준비 후 전달하고, 생성 실패 시 기본 맥락을 유지한다."""
+        """시작 용어와 주기별 전사 용어를 같은 작업에서 적용하고 생성 실패를 격리한다."""
+        initial_terms = []
+        last_context = build_stt_context(event)
         try:
             async with asyncio.timeout(self._context_timeout):
-                context = await self._generate_context(event)
+                initial_terms = await self._generate_context(event)
         except Exception as error:
-            # 조회 거부·장애를 자료 없음으로 바꾸지 않고 생성 자체를 중단한다.
             logger.warning("stt_context_failed", error_type=type(error).__name__)
-            return
-        if not context:
+        if initial_terms:
+            context = build_stt_context(event, initial_terms)
+            if context != last_context and await self._send_context(context):
+                last_context = context
+        else:
             logger.info("stt_context_skipped")
-            return
+
+        while True:
+            await self._context_update.wait()
+            self._context_update.clear()
+            if self._latest_transcript_ms < self._next_context_ms:
+                continue
+            self._next_context_ms = self._latest_transcript_ms + CONTEXT_UPDATE_INTERVAL_MS
+            segments = list(self._recent_transcripts)
+            if not segments:
+                continue
+            transcript = "\n".join(segment.content for segment in segments)
+            logger.info(
+                "stt_context_refresh_started",
+                window_started_at_ms=segments[0].started_at_ms,
+                window_ended_at_ms=self._latest_transcript_ms,
+                transcript_chars=len(transcript),
+            )
+            try:
+                async with asyncio.timeout(self._context_timeout):
+                    terms = await self._extract_terms(event, transcript)
+                context = build_stt_context(event, [*terms, *initial_terms])
+            except Exception as error:
+                logger.warning("stt_context_failed", error_type=type(error).__name__)
+                continue
+            if context != last_context and await self._send_context(context):
+                last_context = context
+
+    async def _send_context(self, context: str) -> bool:
         await self._stt_ready.wait()
         try:
             async with asyncio.timeout(STT_SEND_TIMEOUT):
                 await self._stt_client.update_context(context)
-        except Exception as error:
+        except STTProviderError as error:
             self._on_error(error)
-            return
+            return False
+        except Exception as error:
+            logger.warning("stt_context_failed", error_type=type(error).__name__)
+            return False
         logger.info("stt_context_applied", context_length=len(context))
+        return True
 
     async def _forward_transcripts(self, event: SessionStart) -> None:
         try:
@@ -319,6 +359,19 @@ class RecordingConnection:
                 return
             message = message.model_copy(update={"speaker_id": None})
         self._transcript_queue.put_nowait(message)
+        if isinstance(message, STTTranscript) and message.content.strip():
+            self._recent_transcripts.append(message)
+            self._transcript_chars += len(message.content) + 1
+            self._latest_transcript_ms = max(self._latest_transcript_ms, message.ended_at_ms)
+            cutoff = self._latest_transcript_ms - TRANSCRIPT_CONTEXT_WINDOW_MS
+            while self._recent_transcripts and (
+                self._recent_transcripts[0].ended_at_ms <= cutoff
+                or self._transcript_chars > MAX_TRANSCRIPT_CONTEXT_CHARS
+            ):
+                removed = self._recent_transcripts.popleft()
+                self._transcript_chars -= len(removed.content) + 1
+            if self._latest_transcript_ms >= self._next_context_ms:
+                self._context_update.set()
 
     def _on_provider_error(self, error: Exception) -> None:
         if self._background_error.done():

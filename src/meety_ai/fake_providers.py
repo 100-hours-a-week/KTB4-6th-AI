@@ -135,10 +135,14 @@ def create_live_app() -> FastAPI:
     app.state.stt_client_factory = partial(
         FakeSpeechmaticsClient, latency_seconds=latency.stt_latency_ms / 1000
     )
-    # 선택 단계는 관련 회의 없음으로 처리하고, 생성 단계는 같은 문자열을 맥락으로 전달한다.
-    app.state.stt_context_model = fake_chat_model(
-        latency.summary_latency_ms / 1000, content='{"meetingIds": []}'
-    )
+
+    async def context_response(prompt: Any) -> AIMessage:
+        await asyncio.sleep(latency.summary_latency_ms / 1000)
+        # 선택 프롬프트의 JSON 스키마와 용어 추출 응답 형식을 구분한다.
+        content = '{"meetingIds": []}' if "meetingIds" in prompt.messages[0].content else "테스트"
+        return AIMessage(content=content)
+
+    app.state.stt_context_model = RunnableLambda(context_response)
     return app
 
 

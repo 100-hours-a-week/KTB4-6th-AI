@@ -32,6 +32,7 @@ def fake_speechmatics_client(monkeypatch):
             instances.append(self)
 
         async def start(self, **kwargs):
+            self.start_kwargs = kwargs
             self.closed = False
 
         async def send_audio(self, chunk):
