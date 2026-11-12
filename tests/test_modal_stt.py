@@ -4,6 +4,7 @@ import asyncio
 import socket
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from threading import Thread
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from websockets.asyncio.client import connect
 
+import meety_ai.modal_app.stt.pipeline as pipeline_module
 import meety_ai.stt.modal as adapter_module
 from meety_ai.live import create_live_app
 from meety_ai.modal_app.stt.pipeline import InferenceRuntime, _failure_code, create_inference_app
@@ -928,3 +930,76 @@ def test_context_echo_and_overlong_text_fail_segment_but_keep_real_speech():
     assert _failure_code("네 " * 40, context, 0.72, "stop") == "text_rate_exceeded"
     assert _failure_code("네 그럼 로드맵부터 볼까요", context, 0.72, "stop") is None
     assert _failure_code(quote, context, 5.0, "stop") is None
+
+
+# 테스트 이름: test_full_asr_queue_drops_segment_but_keeps_session
+# 목적: ASR 처리량을 넘는 순간 그 구간만 버리고 회의 연결은 유지한다(#150).
+# 준비: ASR 소비를 멈추고 대기열을 다른 회의의 작업으로 채운 뒤 대기 시간만 짧게 줄인다.
+# 실행: 첫 구간이 대기열에 못 들어가게 닫음 → ASR 재개 → 다음 구간 공급 → 종료.
+# 기대 결과: 첫 구간은 결과 없이 버려지고 다음 구간이 순번 0으로 전사되며 종료 집계가 맞는다.
+# 실패 조건: 대기 시간 초과가 세션 오류로 번지거나 버린 구간이 순번·집계를 차지한다.
+async def test_full_asr_queue_drops_segment_but_keeps_session(monkeypatch):
+    monkeypatch.setattr(pipeline_module, "QUEUE_WAIT_SECONDS", 0.01)
+
+    class Runtime(InferenceRuntime):
+        def __init__(self):
+            self.geometry = {
+                "first_samples": 16000,
+                "chunk_samples": 16000,
+                "frame_samples": 160,
+                "mel_step": 100,
+            }
+            self.calls = []
+            self.start_runtime()
+
+        async def diarize(self, session, pcm, *, last):
+            # 3초마다 앞 1초만 말해 침묵 1초를 넘기면 구간이 닫힌다.
+            return {
+                "active": [
+                    [int(frame % 300 < 100), 0, 0, 0, 0, 0, 0, 0]
+                    for frame in range(session.frames, session.frames + len(pcm) // 320)
+                ],
+                "next_start": session.next_sample + len(pcm) // 2,
+            }
+
+        def _transcribe(self, jobs):
+            self.calls.extend(jobs)
+            return [("정상 전사", None) for job in jobs]
+
+        async def _call_worker(self, request):
+            return {"released": True}
+
+    runtime = Runtime()
+    try:
+        session = runtime.open(
+            SessionStart(type="session.start", meeting_id=1, recording_session_id=1)
+        )
+        runtime.asr_task.cancel()
+        await asyncio.gather(runtime.asr_task, return_exceptions=True)
+        other = SimpleNamespace(aborted=True, job_done=lambda: None)
+        while not runtime.asr_queue.full():
+            runtime.asr_queue.put_nowait(
+                SimpleNamespace(session=other, pcm=b"", queued_at=time.perf_counter())
+            )
+
+        await session.feed(bytes(3 * 16000 * 2))
+        assert session.segments == 0 and session.pending_jobs == 0
+
+        runtime.asr_task = asyncio.create_task(runtime._asr_loop())
+        await session.feed(bytes(3 * 16000 * 2))
+        async with asyncio.timeout(5):
+            await session.finish()
+        results = []
+        while (event := await session.results.get()) is not None:
+            results.append(event)
+        committed = [event for event in results if event["type"] == "segment.committed"]
+        assert [event["segmentId"] for event in committed] == [0]
+        assert committed[0]["startedAtMs"] == 3000
+        assert len(runtime.calls) == 1
+        assert results[-1]["type"] == "session.ended"
+        assert results[-1]["succeededSegments"] == 1
+        assert results[-1]["failedSegments"] == 0
+        await runtime.release(session)
+    finally:
+        runtime.asr_task.cancel()
+        await asyncio.gather(runtime.asr_task, return_exceptions=True)

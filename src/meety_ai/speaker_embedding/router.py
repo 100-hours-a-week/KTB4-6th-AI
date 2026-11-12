@@ -7,14 +7,22 @@ import structlog
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import ValidationError
 
+from meety_ai.core.errors import TaskError
 from meety_ai.speaker_embedding.schemas import SpeakerEmbeddingRequest, SpeakerEmbeddingResponse
 
 logger = structlog.stdlib.get_logger(__name__)
 
 speaker_embedding_router = APIRouter()
 
-# Modal 함수가 반환한 처리 실패 코드별 응답 상태.
-_MODAL_ERROR_STATUS = {"download_failed": 502, "invalid_audio": 422, "inference_failed": 502}
+# Modal 함수가 반환할 수 있는 처리 실패 코드.
+_MODAL_ERROR_CODES = {"download_failed", "invalid_audio", "inference_failed"}
+# 작업 실패 코드별 HTTP 응답 상태.
+_ERROR_STATUS = {
+    "timeout": 504,
+    "download_failed": 502,
+    "invalid_audio": 422,
+    "inference_failed": 502,
+}
 
 
 def _error(status_code: int, error_code: str) -> HTTPException:
@@ -40,7 +48,7 @@ async def embed_speaker(audio_url: str, timeout_seconds: float) -> SpeakerEmbedd
             error_type=type(exc).__name__,
             duration_ms=round((time.perf_counter() - started) * 1000),
         )
-        raise _error(504, "timeout") from None
+        raise TaskError("timeout", "화자 임베딩 응답 시간이 초과되었습니다.") from None
     except modal.exception.Error as exc:
         sentry_sdk.capture_exception(exc)
         logger.warning(
@@ -48,17 +56,17 @@ async def embed_speaker(audio_url: str, timeout_seconds: float) -> SpeakerEmbedd
             error_type=type(exc).__name__,
             duration_ms=round((time.perf_counter() - started) * 1000),
         )
-        raise _error(502, "inference_failed") from None
+        raise TaskError("inference_failed", "화자 임베딩 호출에 실패했습니다.") from None
 
     if isinstance(result, dict) and result.get("status") == "error":
         error_code = result.get("error_code")
-        if error_code not in _MODAL_ERROR_STATUS:
+        if error_code not in _MODAL_ERROR_CODES:
             error_code = "inference_failed"
         sentry_sdk.capture_exception(
             RuntimeError("화자 임베딩 처리 실패"), tags={"error_code": error_code}
         )
         logger.warning("speaker_embedding_failed", error_code=error_code, duration_ms=duration_ms)
-        raise _error(_MODAL_ERROR_STATUS[error_code], error_code)
+        raise TaskError(error_code, "화자 임베딩 처리에 실패했습니다.")
     try:
         if result["status"] != "ok":
             raise ValueError("알 수 없는 status")
@@ -70,7 +78,7 @@ async def embed_speaker(audio_url: str, timeout_seconds: float) -> SpeakerEmbedd
         # 오류 메시지에 벡터 원문이 섞이므로 Sentry에도 예외 타입만 보낸다.
         sentry_sdk.capture_exception(RuntimeError(f"화자 임베딩 응답 오류: {type(exc).__name__}"))
         logger.warning("speaker_embedding_invalid_response", error_type=type(exc).__name__)
-        raise _error(502, "inference_failed") from None
+        raise TaskError("inference_failed", "화자 임베딩 응답 형식이 올바르지 않습니다.") from None
     logger.info(
         "speaker_embedding_completed",
         duration_ms=duration_ms,
@@ -87,6 +95,9 @@ async def generate_speaker_embedding(request: Request) -> SpeakerEmbeddingRespon
         payload = SpeakerEmbeddingRequest.model_validate_json(await request.body())
     except ValidationError:
         raise _error(422, "invalid_request") from None
-    return await embed_speaker(
-        payload.audio_url, request.app.state.settings.speaker_embedding_timeout_seconds
-    )
+    try:
+        return await embed_speaker(
+            payload.audio_url, request.app.state.settings.speaker_embedding_timeout_seconds
+        )
+    except TaskError as error:
+        raise _error(_ERROR_STATUS[error.code], error.code) from None
